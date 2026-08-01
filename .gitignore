@@ -32,6 +32,7 @@ venv/
 
 # Данные синхронизации
 sync_state.json
+reindex_pending.json
 parents.json
 chunks_index.json
 index_meta.json

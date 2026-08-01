@@ -4,9 +4,14 @@ r"""
 Запускать на хосте:
   python3 sync_confluence.py --base "/путь/до/KISU Metro"
 Или через cron:
-  0 0 * * * cd /путь/до/KISU\ Metro && python3 sync_confluence.py >> sync.log 2>&1
+  0 21 * * * cd /путь/до/KISU\ Metro && .venv/bin/python sync_confluence.py >> sync.log 2>&1
+
+Индексация:
+  - обычный дифф → index_section.py батчами по PAGE_BATCH_SIZE page_id;
+  - «Стадии проекта» и дифф ≥ LARGE_DIFF_PAGES → полная resumable_index.py;
+  - сбой индексации → reindex_pending.json, повтор на следующем запуске.
 """
-import json, os, sys, time, argparse, logging, hashlib
+import json, os, sys, time, argparse, logging, hashlib, shutil, subprocess
 from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
@@ -31,6 +36,15 @@ CHUNK_OVERLAP = 150
 MIN_CHUNK_LEN = 100
 WORKERS = 5
 TIMEOUT = 30
+
+# Индексация: батчи не меняют итоговый индекс (тот же keep/replace + полный BM25),
+# только снижают риск timeout на одном огромном --pages.
+PAGE_BATCH_SIZE = 75
+PAGE_BATCH_TIMEOUT = 3600          # сек на один батч инкремента
+LARGE_DIFF_PAGES = 200             # порог «большого» диффа
+RESUMABLE_SECTIONS = {"Стадии проекта"}
+RESUMABLE_LOOP_TIMEOUT = 43200     # 12 ч на полный resumable-цикл
+PENDING_REINDEX_FILE = "reindex_pending.json"
 
 # ── Утилиты ───────────────────────────────────────────────
 def setup_logging(base: str):
@@ -176,6 +190,164 @@ def save_state(base: str, state: dict):
     with open(os.path.join(base, "sync_state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+def _pending_path(base: str) -> str:
+    return os.path.join(base, PENDING_REINDEX_FILE)
+
+def load_pending_reindex(base: str) -> dict:
+    path = _pending_path(base)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_pending_reindex(base: str, pending: dict):
+    path = _pending_path(base)
+    if not pending:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(pending, f, ensure_ascii=False, indent=2)
+
+def mark_reindex_pending(base: str, section: str, page_ids: list):
+    pending = load_pending_reindex(base)
+    old = set(pending.get(section, []))
+    pending[section] = sorted(old | set(page_ids))
+    save_pending_reindex(base, pending)
+
+def clear_reindex_pending(base: str, section: str):
+    pending = load_pending_reindex(base)
+    if section in pending:
+        pending.pop(section, None)
+        save_pending_reindex(base, pending)
+
+def _python_bin(script_dir: str) -> str:
+    venv_python = os.path.join(script_dir, ".venv", "bin", "python")
+    return venv_python if os.path.exists(venv_python) else "python3"
+
+def run_resumable_reindex(logger, base: str, section: str, python_bin: str) -> bool:
+    """Полная возобновляемая индексация раздела (для больших диффов «Стадии»)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    indexer = os.path.join(script_dir, "resumable_index.py")
+    if not os.path.exists(indexer):
+        logger.error(f"  ❌ Не найден resumable_index.py: {indexer}")
+        return False
+
+    # Чистый старт: старый чекпоинт мог быть от другого числа чанков
+    ckpt = os.path.join(base, section, ".checkpoint")
+    if os.path.isdir(ckpt):
+        shutil.rmtree(ckpt)
+        logger.info("  Удалён старый .checkpoint перед полной индексацией")
+
+    env = os.environ.copy()
+    env["KISU_METRO_BASE"] = base
+    for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        env.setdefault(k, "4")
+
+    logger.info(f"  Resumable полная индексация: {section} "
+                f"(лимит цикла {RESUMABLE_LOOP_TIMEOUT}с)")
+    t0 = time.time()
+    run = 0
+    while True:
+        if time.time() - t0 > RESUMABLE_LOOP_TIMEOUT:
+            logger.error(f"  ❌ Resumable: превышен лимит {RESUMABLE_LOOP_TIMEOUT}с")
+            return False
+        run += 1
+        logger.info(f"  Resumable запуск #{run}...")
+        result = subprocess.run(
+            [python_bin, indexer, section],
+            capture_output=True, text=True, env=env
+        )
+        if result.stdout:
+            logger.info(result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout)
+        if result.returncode == 0:
+            logger.info(f"  ✅ Resumable индекс готов ({run} запусков)")
+            return True
+        if result.returncode == 2:
+            logger.info("  → чекпоинт сохранён, продолжаем...")
+            continue
+        err = (result.stderr or result.stdout or "")[:800]
+        logger.error(f"  ❌ Resumable ошибка (exit={result.returncode}): {err}")
+        return False
+
+def run_batched_incremental_reindex(logger, base: str, section: str,
+                                    page_ids: list, python_bin: str) -> bool:
+    """
+    Инкрементальная индексация батчами page_id.
+    Итог эквивалентен одному --pages со всеми id: для каждого батча
+    удаляются старые эмбеддинги страниц и добавляются новые, BM25
+    пересобирается по полному актуальному корпусу.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    index_script = os.path.join(script_dir, "index_section.py")
+    if not os.path.exists(index_script):
+        logger.error(f"  ❌ Не найден index_section.py: {index_script}")
+        return False
+
+    total = len(page_ids)
+    n_batches = (total + PAGE_BATCH_SIZE - 1) // PAGE_BATCH_SIZE
+    logger.info(f"  Инкрементальная индексация батчами: {total} стр. "
+                f"× batch={PAGE_BATCH_SIZE} ({n_batches} батч.)")
+
+    for i in range(0, total, PAGE_BATCH_SIZE):
+        batch = page_ids[i:i + PAGE_BATCH_SIZE]
+        batch_no = i // PAGE_BATCH_SIZE + 1
+        logger.info(f"  Батч {batch_no}/{n_batches}: {len(batch)} стр.")
+        cmd = [python_bin, index_script, section, "--pages", ",".join(batch)]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=PAGE_BATCH_TIMEOUT
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(f"  ❌ Батч {batch_no}/{n_batches}: timeout "
+                         f"после {PAGE_BATCH_TIMEOUT}с")
+            # Помечаем оставшиеся (включая текущий) для повтора
+            mark_reindex_pending(base, section, page_ids[i:])
+            return False
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "")[:500]
+            logger.error(f"  ❌ Батч {batch_no}/{n_batches}: {err}")
+            mark_reindex_pending(base, section, page_ids[i:])
+            return False
+
+    logger.info("  ✅ Индекс обновлён (все батчи)")
+    return True
+
+def reindex_section(logger, base: str, section: str, changed_page_ids: list) -> bool:
+    """Выбирает стратегию индексации и запускает её."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    python_bin = _python_bin(script_dir)
+
+    check = subprocess.run(
+        [python_bin, "-c", "import numpy"],
+        capture_output=True, text=True, timeout=10
+    )
+    if check.returncode != 0:
+        logger.warning(f"  ⚠️  numpy не найден — пропускаем индексацию "
+                       f"(установи: {python_bin} -m pip install numpy)")
+        mark_reindex_pending(base, section, changed_page_ids)
+        return False
+
+    use_resumable = (
+        section in RESUMABLE_SECTIONS
+        and len(changed_page_ids) >= LARGE_DIFF_PAGES
+    )
+    if use_resumable:
+        logger.info(f"  Дифф {len(changed_page_ids)} ≥ {LARGE_DIFF_PAGES} "
+                    f"для «{section}» → полная resumable-индексация "
+                    f"(точность = полный пересчёт по актуальных чанкам)")
+        ok = run_resumable_reindex(logger, base, section, python_bin)
+    else:
+        ok = run_batched_incremental_reindex(
+            logger, base, section, changed_page_ids, python_bin
+        )
+
+    if ok:
+        clear_reindex_pending(base, section)
+    else:
+        mark_reindex_pending(base, section, changed_page_ids)
+    return ok
+
 # ── Главный цикл ──────────────────────────────────────────
 def sync_section(session, logger, base: str, section: str, section_id: str,
                  state: dict, force: bool = False):
@@ -191,7 +363,10 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
     pages = get_changed_pages(session, section_id, since)
     logger.info(f"  Изменённых страниц: {len(pages)}")
 
-    if not pages and not force:
+    pending = load_pending_reindex(base)
+    pending_ids = list(pending.get(section, []))
+
+    if not pages and not force and not pending_ids:
         logger.info(f"  Нет изменений — пропускаем")
         return
 
@@ -207,7 +382,6 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
                 existing[pid].append(c)
 
     # 3. Обновляем чанки для изменённых страниц
-    new_count = 0
     updated_count = 0
     skipped_count = 0
     changed_page_ids = []  # page_id, для которых реально обновлены чанки
@@ -228,50 +402,30 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
 
         state["page_versions"][pid] = new_version
 
-    # 4. Перезаписываем chunks_export.jsonl
+    # 4. Перезаписываем chunks_export.jsonl (только если были обновления чанков)
     all_chunks = []
     for chunks_list in existing.values():
         all_chunks.extend(chunks_list)
-    with open(chunks_path, "w", encoding="utf-8") as f:
-        for c in all_chunks:
-            f.write(json.dumps(c, ensure_ascii=False) + "\n")
 
-    logger.info(f"  Всего чанков: {len(all_chunks)} "
-                f"(добавлено: {updated_count}, без изменений: {skipped_count})")
+    if updated_count > 0:
+        with open(chunks_path, "w", encoding="utf-8") as f:
+            for c in all_chunks:
+                f.write(json.dumps(c, ensure_ascii=False) + "\n")
+        logger.info(f"  Всего чанков: {len(all_chunks)} "
+                    f"(добавлено: {updated_count}, без изменений: {skipped_count})")
+    elif pending_ids:
+        logger.info(f"  Чанки без изменений Confluence; pending reindex: {len(pending_ids)} стр.")
 
-    # 5. Перестраиваем индекс (если были изменения)
-    if updated_count > 0 and len(all_chunks) > 0:
-        logger.info(f"  Перестроение индекса...")
+    # 5. Перестраиваем индекс (новые изменения + незавершённые с прошлых запусков)
+    reindex_ids = list(dict.fromkeys(changed_page_ids + pending_ids))
+    if reindex_ids and os.path.exists(chunks_path):
+        extra = f", pending={len(pending_ids)}" if pending_ids else ""
+        logger.info(f"  Перестроение индекса ({len(reindex_ids)} стр.{extra})...")
         try:
-            import subprocess
-            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index_section.py")
-            # Авто-определение: .venv на хосте, python3 в контейнере
-            venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python")
-            python_bin = venv_python if os.path.exists(venv_python) else "python3"
-
-            # Pre-check: numpy должен быть доступен (иначе падает внутри index_section.py)
-            check = subprocess.run(
-                [python_bin, "-c", "import numpy"],
-                capture_output=True, text=True, timeout=10
-            )
-            if check.returncode != 0:
-                logger.warning(f"  ⚠️  numpy не найден — пропускаем индексацию "
-                               f"(установи: {python_bin} -m pip install numpy)")
-            else:
-                # Инкрементальная индексация (только изменённые страницы)
-                cmd = [python_bin, script, section,
-                       "--pages", ",".join(changed_page_ids)]
-                logger.info(f"  Индексация: {' '.join(cmd[3:])}")
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True, text=True, timeout=14400
-                )
-                if result.returncode == 0:
-                    logger.info(f"  ✅ Индекс обновлён")
-                else:
-                    logger.error(f"  ❌ Ошибка индексации: {result.stderr[:500]}")
+            reindex_section(logger, base, section, reindex_ids)
         except Exception as e:
             logger.error(f"  ❌ Ошибка запуска индексации: {e}")
+            mark_reindex_pending(base, section, reindex_ids)
 
 def main():
     parser = argparse.ArgumentParser(description="Инкрементальная синхронизация Confluence")
