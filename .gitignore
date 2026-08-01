@@ -1,0 +1,41 @@
+# Токены и секреты
+.env
+
+# Индексы (большие бинарные файлы)
+index/
+*/index/
+*.npy
+*.pkl
+
+# Чекпоинты
+.checkpoint/
+*.checkpoint/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Кэш моделей
+.hf_cache/
+*.safetensors
+
+# Временные файлы
+*.tmp
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+
+# Данные синхронизации
+sync_state.json
+parents.json
+chunks_index.json
+index_meta.json
+
+# Логи
+*.log
+nohup.out
