@@ -33,6 +33,7 @@ ALL_SECTIONS = [
 ]
 SEMANTIC_WEIGHT = 0.6
 TFIDF_WEIGHT = 0.4
+E5_QUERY_PREFIX = "query: "
 
 # === Глобальный кэш ===
 _cache = {}          # section → {chunks, embeddings, vectorizer, matrix}
@@ -59,6 +60,10 @@ def load_section(section: str) -> dict:
 
     with open(os.path.join(idx_dir, "bm25_index.pkl"), "rb") as f:
         bm25_data = pickle.load(f)
+
+    if not meta.get("e5_prefixes"):
+        print(f"⚠️  {section}: индекс без e5_prefixes — качество семантики "
+              f"снижено до полной переиндексации", file=sys.stderr)
 
     return {
         "section": section,
@@ -153,6 +158,7 @@ def resolve_parents(results: list) -> list:
                 "section": best["section"],
                 "title": parent["title"],
                 "url": parent["url"],
+                "breadcrumbs": parent.get("breadcrumbs") or best.get("breadcrumbs", ""),
                 "text": parent["full_text"],
                 "score": best["score"],
                 "source": "parent",  # помечаем, что это полная страница
@@ -170,7 +176,10 @@ def semantic_search(query: str, section_data: dict, top_k: int = 30) -> list:
     global _model
     embeddings = section_data["embeddings"]
 
-    q_emb = _model.encode([query])[0]
+    # multilingual-e5: документы с «passage:», запросы с «query:»
+    # Для старых индексов без e5_prefixes — кодируем запрос как раньше (без префикса)
+    q_text = (E5_QUERY_PREFIX + query) if section_data.get("meta", {}).get("e5_prefixes") else query
+    q_emb = _model.encode([q_text])[0]
     q_norm = q_emb / (np.linalg.norm(q_emb) + 1e-8)
     d_norm = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
     scores = np.dot(d_norm, q_norm)
@@ -335,6 +344,7 @@ def search(query: str, top_k: int = 10, sections: list = None,
             "title": chunk.get("title", ""),
             "url": chunk.get("url", ""),
             "page_id": chunk.get("page_id", ""),
+            "breadcrumbs": chunk.get("breadcrumbs", ""),
             "text": chunk["text"],
             "score": r["fusion_score"],
         })
@@ -365,6 +375,8 @@ def format_context(results: list, query: str, use_parents: bool = False) -> str:
         buf.append("---")
         buf.append(f"## {i}. {r['title']}")
         buf.append(f"*Раздел:* {r['section']}  |  *Релевантность:* {r['score']}")
+        if r.get("breadcrumbs"):
+            buf.append(f"*Путь:* {r['breadcrumbs']}")
         if r["url"]:
             buf.append(f"*Источник:* {r['url']}")
         if r.get("page_id"):
@@ -429,6 +441,7 @@ def main():
                 "title": r["title"],
                 "url": r["url"],
                 "page_id": r.get("page_id", ""),
+                "breadcrumbs": r.get("breadcrumbs", ""),
                 "text": r["text"][:2000],
                 "score": r["score"],
             }

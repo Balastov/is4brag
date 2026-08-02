@@ -22,6 +22,7 @@ MODEL_NAME = "intfloat/multilingual-e5-large"
 BATCH_SIZE = 64
 CHECKPOINT_EVERY = 10       # батчей между чекпоинтами
 MAX_RUNTIME = 540           # макс. секунд на запуск (в пределах 600с песочницы)
+E5_PASSAGE_PREFIX = "passage: "
 # Базовый каталог с индексами (на сервере: /mnt/write/KISU Metro)
 BASE_DIR = os.environ.get("KISU_METRO_BASE", "/mnt/write/KISU Metro")
 
@@ -104,8 +105,9 @@ class ResumableIndexer:
 
                 start = b * BATCH_SIZE
                 end = min(start + BATCH_SIZE, N)
+                batch_texts = [E5_PASSAGE_PREFIX + t for t in texts[start:end]]
                 batch_emb = model.encode(
-                    texts[start:end],
+                    batch_texts,
                     show_progress_bar=False,
                     batch_size=BATCH_SIZE,
                     normalize_embeddings=True
@@ -171,8 +173,9 @@ class ResumableIndexer:
 
         # Индексные чанки
         index_chunks = [
-            {"chunk_id": i, "text": c["text"], "title": c["title"],
-             "url": c.get("url", ""), "page_id": c.get("page_id", "")}
+            {"chunk_id": i, "text": c["text"], "title": c.get("title", ""),
+             "url": c.get("url", ""), "page_id": c.get("page_id", ""),
+             "breadcrumbs": c.get("breadcrumbs", "")}
             for i, c in enumerate(chunks_raw)
         ]
 
@@ -188,6 +191,7 @@ class ResumableIndexer:
         meta = {
             "section": self.section, "total_chunks": len(index_chunks),
             "embedding_model": MODEL_NAME, "embedding_dim": dim,
+            "e5_prefixes": True,
             "chunk_size": 800, "chunk_overlap": 150,
             "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "confluence_url": "https://conf-metro.ibs.ru"

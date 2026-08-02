@@ -20,6 +20,24 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 BASE = os.path.dirname(os.path.abspath(__file__))  # каталог KISU Metro
 MODEL_NAME = "intfloat/multilingual-e5-large"
 BATCH_SIZE = 32
+# multilingual-e5-* требует префиксы: passage: для документов, query: для запросов
+E5_PASSAGE_PREFIX = "passage: "
+
+
+def _embed_texts(texts: list) -> list:
+    """Тексты для encode() с префиксом E5 (BM25/TF-IDF — без префикса)."""
+    return [E5_PASSAGE_PREFIX + (t or "") for t in texts]
+
+
+def _chunk_record(i: int, c: dict) -> dict:
+    return {
+        "chunk_id": i,
+        "text": c["text"],
+        "title": c.get("title", ""),
+        "url": c.get("url", ""),
+        "page_id": c.get("page_id", ""),
+        "breadcrumbs": c.get("breadcrumbs", ""),
+    }
 
 def build(section: str, device: str = "cpu", page_ids: set = None):
     """Полная или инкрементальная индексация.
@@ -47,12 +65,25 @@ def build(section: str, device: str = "cpu", page_ids: set = None):
     has_existing = os.path.exists(emb_path) and os.path.exists(chunks_idx_path)
 
     # ── Инкрементальный режим ──
-    if page_ids and has_existing:
+    # Нельзя смешивать эмбеддинги без E5-префикса и с префиксом
+    meta_ok = False
+    if has_existing:
+        try:
+            with open(os.path.join(out_dir, "index_meta.json"), encoding="utf-8") as f:
+                meta_ok = bool(json.load(f).get("e5_prefixes"))
+        except Exception:
+            meta_ok = False
+
+    if page_ids and has_existing and meta_ok:
         print(f"[{time.strftime('%H:%M:%S')}] Инкрементальная индексация: {section}")
         print(f"  Изменённых page_id: {len(page_ids)}")
         _build_incremental(section, out_dir, chunks_path, new_chunks_raw,
                            page_ids, device)
         return
+
+    if page_ids and has_existing and not meta_ok:
+        print(f"[{time.strftime('%H:%M:%S')}] ⚠️  Индекс без e5_prefixes — "
+              f"полная переиндексация (инкремент смешает несовместимые векторы)")
 
     # ── Полная переиндексация (старое поведение) ──
     print(f"[{time.strftime('%H:%M:%S')}] Полная индексация: {section}")
@@ -106,7 +137,7 @@ def _build_incremental(section: str, out_dir: str, chunks_path: str,
         model = SentenceTransformer(MODEL_NAME, device=device)
         t0 = time.time()
         new_texts = [c["text"] for c in new_chunks_for_pages]
-        new_embeddings = model.encode(new_texts, show_progress_bar=True,
+        new_embeddings = model.encode(_embed_texts(new_texts), show_progress_bar=True,
                                       batch_size=BATCH_SIZE, normalize_embeddings=True)
         elapsed = time.time() - t0
         print(f"  Готово за {elapsed:.0f}с ({len(new_chunks_for_pages)/elapsed:.0f} чанков/с) "
@@ -152,24 +183,19 @@ def _full_index(out_dir: str, chunks: list, texts: list, N: int,
     # Эмбеддинги
     print(f"[{time.strftime('%H:%M:%S')}] Эмбеддинги ({N} текстов)...")
     t0 = time.time()
-    embeddings = model.encode(texts, show_progress_bar=True,
+    embeddings = model.encode(_embed_texts(texts), show_progress_bar=True,
                               batch_size=BATCH_SIZE, normalize_embeddings=True)
     elapsed = time.time() - t0
     print(f"  Готово за {elapsed:.0f}с ({N/elapsed:.0f} чанков/с) | shape={embeddings.shape}")
 
-    # BM25
+    # BM25 / TF-IDF — по сырому тексту без E5-префикса
     print(f"[{time.strftime('%H:%M:%S')}] BM25 индекс...")
     t0 = time.time()
     vectorizer = TfidfVectorizer(max_features=10000, lowercase=True)
     bm25_matrix = vectorizer.fit_transform(texts)
     print(f"  Готово за {time.time()-t0:.1f}с | shape={bm25_matrix.shape}")
 
-    # Индексные чанки
-    index_chunks = [
-        {"chunk_id": i, "text": c["text"], "title": c["title"],
-         "url": c.get("url", ""), "page_id": c.get("page_id", "")}
-        for i, c in enumerate(chunks)
-    ]
+    index_chunks = [_chunk_record(i, c) for i, c in enumerate(chunks)]
 
     _save_index(out_dir, embeddings, vectorizer, bm25_matrix,
                 index_chunks, section, int(embeddings.shape[1]))
@@ -189,6 +215,7 @@ def _save_index(out_dir: str, embeddings, vectorizer, bm25_matrix,
     meta = {
         "section": section, "total_chunks": len(index_chunks),
         "embedding_model": MODEL_NAME, "embedding_dim": dim,
+        "e5_prefixes": True,
         "chunk_size": 800, "chunk_overlap": 150,
         "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "confluence_url": "https://conf-metro.ibs.ru"
@@ -211,9 +238,12 @@ def _save_index(out_dir: str, embeddings, vectorizer, bm25_matrix,
                 "title": c.get("title", ""),
                 "url": c.get("url", ""),
                 "page_id": pid,
+                "breadcrumbs": c.get("breadcrumbs", ""),
                 "chunk_ids": [],
                 "full_text": ""
             }
+        elif not parents[pid].get("breadcrumbs") and c.get("breadcrumbs"):
+            parents[pid]["breadcrumbs"] = c["breadcrumbs"]
         parents[pid]["chunk_ids"].append(c["chunk_id"])
 
     # Склеиваем текст чанков → полный текст страницы

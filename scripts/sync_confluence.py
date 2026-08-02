@@ -67,46 +67,175 @@ def api_get(session, endpoint, params=None):
     resp.raise_for_status()
     return resp.json()
 
-def clean_html(raw: str) -> str:
-    """Простая очистка HTML → plain text"""
+_HTML_ENTITIES = {
+    "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"',
+    "&nbsp;": " ", "&apos;": "'", "&#39;": "'",
+}
+
+def _unescape_html(text: str) -> str:
     import re
-    text = re.sub(r'<style[^>]*>.*?</style>', '', raw, flags=re.DOTALL)
-    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'&[a-z]+;', lambda m: {'&amp;':'&','&lt;':'<','&gt;':'>',
-                    '&quot;':'"','&nbsp;':' ','&apos;':"'"}.get(m.group(), ' '), text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(
+        r'&[a-zA-Z]+;|&#\d+;|&#x[0-9a-fA-F]+;',
+        lambda m: _HTML_ENTITIES.get(m.group(), m.group()),
+        text,
+    )
     return text
 
+def _strip_tags(html: str) -> str:
+    import re
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = _unescape_html(text)
+    return re.sub(r'[ \t]+', ' ', text).strip()
+
+def _table_to_text(table_html: str, table_idx: int) -> str:
+    """Confluence <table> → текстовые строки с номерами (для поиска по строкам БП)."""
+    import re
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, flags=re.I | re.DOTALL)
+    if not rows:
+        return _strip_tags(table_html)
+    lines = [f"[Таблица {table_idx}]"]
+    for ri, row in enumerate(rows, 1):
+        cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', row, flags=re.I | re.DOTALL)
+        cells = [_strip_tags(c) for c in cells]
+        if not any(cells):
+            continue
+        is_header = bool(re.search(r'<th\b', row, flags=re.I))
+        label = "заголовок" if is_header else f"строка {ri}"
+        lines.append("| " + label + " | " + " | ".join(cells) + " |")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+def html_to_text(raw: str) -> str:
+    """
+    HTML storage Confluence → plain text.
+    Таблицы сохраняются построчно с метками «строка N», остальное — с переносами.
+    """
+    import re
+    if not raw:
+        return ""
+    text = re.sub(r'<style[^>]*>.*?</style>', '', raw, flags=re.I | re.DOTALL)
+    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.I | re.DOTALL)
+
+    table_idx = 0
+
+    def _replace_table(match):
+        nonlocal table_idx
+        table_idx += 1
+        converted = _table_to_text(match.group(0), table_idx)
+        return "\n" + converted + "\n" if converted else "\n"
+
+    text = re.sub(r'<table[^>]*>.*?</table>', _replace_table, text, flags=re.I | re.DOTALL)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.I)
+    text = re.sub(r'</p\s*>', '\n', text, flags=re.I)
+    text = re.sub(r'</h[1-6]\s*>', '\n', text, flags=re.I)
+    text = re.sub(r'</tr\s*>', '\n', text, flags=re.I)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = _unescape_html(text)
+    # Сжимаем пробелы внутри строк, пустые строки — одна
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r'[ \t]+', ' ', line).strip()
+        if line:
+            lines.append(line)
+        elif lines and lines[-1] != "":
+            lines.append("")
+    return "\n".join(lines).strip()
+
+# Обратная совместимость для внешних вызовов/тестов
+def clean_html(raw: str) -> str:
+    """Раньше склеивал всё в одну строку; теперь сохраняет структуру (таблицы/абзацы)."""
+    return html_to_text(raw)
+
+def page_breadcrumbs(page: dict) -> str:
+    """Путь ancestors + title страницы: «Раздел > … > ПР_…»."""
+    parts = []
+    for anc in page.get("ancestors") or []:
+        t = (anc.get("title") or "").strip()
+        if t:
+            parts.append(t)
+    title = (page.get("title") or "").strip()
+    if title and (not parts or parts[-1] != title):
+        parts.append(title)
+    return " > ".join(parts)
+
 def chunk_text(text: str) -> list[str]:
-    """Простое чанкирование с перекрытием"""
+    """
+    Чанкирование с предпочтением границ строк (строки таблиц не режутся посередине,
+    если строка короче CHUNK_SIZE).
+    """
+    if not text or not text.strip():
+        return []
+
+    lines = text.split("\n")
     chunks = []
-    start = 0
-    while start < len(text):
-        chunk = text[start:start + CHUNK_SIZE]
-        if len(chunk.strip()) >= MIN_CHUNK_LEN:
-            chunks.append(chunk.strip())
-        start += CHUNK_SIZE - CHUNK_OVERLAP
+    buf: list[str] = []
+    buf_len = 0
+
+    def _flush(overlap: bool):
+        nonlocal buf, buf_len
+        chunk = "\n".join(buf).strip()
+        if len(chunk) >= MIN_CHUNK_LEN:
+            chunks.append(chunk)
+        if not overlap or not buf:
+            buf, buf_len = [], 0
+            return
+        # overlap по хвосту ~CHUNK_OVERLAP символов
+        kept: list[str] = []
+        ol = 0
+        for line in reversed(buf):
+            add = len(line) + (1 if kept else 0)
+            if kept and ol + add > CHUNK_OVERLAP:
+                break
+            kept.insert(0, line)
+            ol += add
+        buf, buf_len = kept, sum(len(x) + 1 for x in kept)
+
+    for line in lines:
+        # Очень длинная строка — режем по символам
+        if len(line) > CHUNK_SIZE:
+            if buf:
+                _flush(overlap=True)
+            start = 0
+            while start < len(line):
+                piece = line[start:start + CHUNK_SIZE].strip()
+                if len(piece) >= MIN_CHUNK_LEN:
+                    chunks.append(piece)
+                start += CHUNK_SIZE - CHUNK_OVERLAP
+            continue
+
+        add_len = len(line) + (1 if buf else 0)
+        if buf and buf_len + add_len > CHUNK_SIZE:
+            _flush(overlap=True)
+        buf.append(line)
+        buf_len += add_len
+
+    if buf:
+        _flush(overlap=False)
     return chunks
 
 def page_to_chunks(page: dict) -> list[dict]:
-    """Конвертирует страницу Confluence в чанки"""
+    """Конвертирует страницу Confluence в чанки (таблицы + breadcrumbs)."""
     body = page.get("body", {}).get("storage", {}).get("value", "")
     title = page.get("title", "Без названия")
     page_id = page.get("id", "")
     url = f"{CONFLUENCE_URL}/spaces/METRO/pages/{page_id}"
-    text = clean_html(body)
+    breadcrumbs = page_breadcrumbs(page)
+    body_text = html_to_text(body)
+    header = f"Путь: {breadcrumbs}\nЗаголовок: {title}\n\n" if breadcrumbs else f"Заголовок: {title}\n\n"
+
     chunks = []
-    for i, chunk in enumerate(chunk_text(text)):
+    for i, chunk in enumerate(chunk_text(body_text)):
         chunk_id = hashlib.md5(f"{page_id}_{i}".encode()).hexdigest()[:12]
         chunks.append({
             "chunk_id": chunk_id,
             "page_id": page_id,
             "title": title,
             "url": url,
-            "text": chunk,
+            "breadcrumbs": breadcrumbs,
+            "text": header + chunk,
             "chunk_index": i,
         })
+    # Страница без тела, но с заголовком — один короткий чанк-заглушка не создаём
+    # (MIN_CHUNK_LEN отфильтрует). Если только title важен — он в breadcrumbs соседних.
     return chunks
 
 # ── Проверка изменений ────────────────────────────────────
