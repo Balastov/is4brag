@@ -68,7 +68,36 @@ python3 skills/galaktika-erp/scripts/galaktika_search.py "хозоперации
 
 ## Автоматизация
 
-Ежедневная синхронизация в 21:00:
+### Автодеплой кода с GitHub → сервер (rag)
+
+На `master@rag` один раз:
+
+```bash
+# если репо ещё нет локально — скрипт сам клонирует
+curl -fsSL https://raw.githubusercontent.com/Balastov/is4brag/main/scripts/setup_autodeploy.sh -o /tmp/setup_autodeploy.sh
+bash /tmp/setup_autodeploy.sh
+```
+
+Или из уже склонированного репо:
+
+```bash
+bash scripts/setup_autodeploy.sh
+# при необходимости:
+# SKILLS_PUBLIC=/path/to/skills/public bash scripts/setup_autodeploy.sh
+```
+
+Дальше каждые 5 минут cron делает `git fetch` и при новых коммитах в `main` копирует скрипты в  
+`/home/alex/Desktop/DeerFlow/WRITE_FOLDER/KISU Metro` и skills в DeerFlow `skills/public`.  
+Лог: `~/is4brag/deploy.log`.
+
+Ручной деплой:
+
+```bash
+cd ~/is4brag && git pull && bash scripts/deploy.sh
+```
+
+### Ежедневная синхронизация Confluence в 21:00
+
 ```bash
 bash scripts/setup_cron.sh
 ```

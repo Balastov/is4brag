@@ -1,0 +1,35 @@
+# Опциональный деплой по SSH (workflow_dispatch).
+# Основной автодеплой на rag — cron-pull: scripts/setup_autodeploy.sh
+#
+# Secrets (Settings → Secrets → Actions):
+#   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
+#   DEPLOY_PORT (optional, default 22)
+name: Deploy to rag (SSH)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy-ssh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull + deploy on server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            REPO_DIR="${HOME}/is4brag"
+            if [ ! -d "$REPO_DIR/.git" ]; then
+              git clone https://github.com/Balastov/is4brag.git "$REPO_DIR"
+            fi
+            cd "$REPO_DIR"
+            git fetch --prune origin main
+            git reset --hard origin/main
+            chmod +x scripts/*.sh
+            bash scripts/deploy.sh
+            echo "deployed $(git rev-parse --short HEAD)"
