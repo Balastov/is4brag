@@ -8,6 +8,9 @@ BRANCH="${AUTODEPLOY_BRANCH:-main}"
 REMOTE="${AUTODEPLOY_REMOTE:-origin}"
 LOCK_FILE="${REPO_DIR}/.autodeploy.lock"
 LOG_FILE="${REPO_DIR}/deploy.log"
+# Дефолт для rag; можно переопределить из crontab
+export SKILLS_PUBLIC="${SKILLS_PUBLIC:-/home/master/deer-flow/skills/public}"
+export KISU_BASE="${KISU_BASE:-/home/alex/Desktop/DeerFlow/WRITE_FOLDER/KISU Metro}"
 
 cd "$REPO_DIR"
 

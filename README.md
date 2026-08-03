@@ -82,12 +82,13 @@ bash /tmp/setup_autodeploy.sh
 
 ```bash
 bash scripts/setup_autodeploy.sh
-# при необходимости:
-# SKILLS_PUBLIC=/path/to/skills/public bash scripts/setup_autodeploy.sh
 ```
 
-Дальше каждые 5 минут cron делает `git fetch` и при новых коммитах в `main` копирует скрипты в  
-`/home/alex/Desktop/DeerFlow/WRITE_FOLDER/KISU Metro` и skills в DeerFlow `skills/public`.  
+По умолчанию на rag:
+- `KISU_BASE=/home/alex/Desktop/DeerFlow/WRITE_FOLDER/KISU Metro`
+- `SKILLS_PUBLIC=/home/master/deer-flow/skills/public` (→ `/app/skills/public` в `deer-flow-gateway`)
+
+Дальше каждые 5 минут cron делает `git fetch` и при новых коммитах в `main` копирует скрипты и skills.  
 Лог: `~/is4brag/deploy.log`.
 
 Ручной деплой:
