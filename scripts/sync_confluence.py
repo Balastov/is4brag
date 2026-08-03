@@ -479,7 +479,7 @@ def reindex_section(logger, base: str, section: str, changed_page_ids: list) -> 
 
 # ── Главный цикл ──────────────────────────────────────────
 def sync_section(session, logger, base: str, section: str, section_id: str,
-                 state: dict, force: bool = False):
+                 state: dict, force: bool = False, skip_index: bool = False):
     logger.info(f"{'='*50}")
     logger.info(f"Синхронизация: {section} (ID={section_id})")
 
@@ -547,14 +547,23 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
 
     # 5. Перестраиваем индекс (новые изменения + незавершённые с прошлых запусков)
     reindex_ids = list(dict.fromkeys(changed_page_ids + pending_ids))
-    if reindex_ids and os.path.exists(chunks_path):
-        extra = f", pending={len(pending_ids)}" if pending_ids else ""
-        logger.info(f"  Перестроение индекса ({len(reindex_ids)} стр.{extra})...")
-        try:
-            reindex_section(logger, base, section, reindex_ids)
-        except Exception as e:
-            logger.error(f"  ❌ Ошибка запуска индексации: {e}")
-            mark_reindex_pending(base, section, reindex_ids)
+    if not reindex_ids or not os.path.exists(chunks_path):
+        return
+
+    if skip_index:
+        # Только обновить чанки; индекс — позже (pending подхватит следующий sync без --skip-index)
+        mark_reindex_pending(base, section, reindex_ids)
+        logger.info(f"  ⏸  --skip-index: индексация отложена "
+                    f"({len(reindex_ids)} стр. → reindex_pending.json)")
+        return
+
+    extra = f", pending={len(pending_ids)}" if pending_ids else ""
+    logger.info(f"  Перестроение индекса ({len(reindex_ids)} стр.{extra})...")
+    try:
+        reindex_section(logger, base, section, reindex_ids)
+    except Exception as e:
+        logger.error(f"  ❌ Ошибка запуска индексации: {e}")
+        mark_reindex_pending(base, section, reindex_ids)
 
 def main():
     parser = argparse.ArgumentParser(description="Инкрементальная синхронизация Confluence")
@@ -562,6 +571,9 @@ def main():
                         help="Путь к папке KISU Metro")
     parser.add_argument("--force", action="store_true",
                         help="Полная пересинхронизация (игнорировать версии)")
+    parser.add_argument("--skip-index", action="store_true",
+                        help="Только чанки из Confluence, без переиндексации "
+                             "(страницы пишутся в reindex_pending.json)")
     parser.add_argument("--section", help="Синхронизировать только указанный раздел")
     args = parser.parse_args()
 
@@ -569,7 +581,10 @@ def main():
     state = load_state(args.base)
 
     logger.info("=" * 60)
-    logger.info(f"🚀 Синхронизация Confluence | Режим: {'FULL' if args.force else 'INCREMENTAL'}")
+    mode = "FULL" if args.force else "INCREMENTAL"
+    if args.skip_index:
+        mode += "+SKIP_INDEX"
+    logger.info(f"🚀 Синхронизация Confluence | Режим: {mode}")
     logger.info(f"   URL: {CONFLUENCE_URL}")
     logger.info(f"   BASE: {args.base}")
     logger.info(f"   PID: {os.getpid()}")
@@ -586,13 +601,17 @@ def main():
 
     for section, sid in sections_to_sync.items():
         try:
-            sync_section(session, logger, args.base, section, sid, state, args.force)
+            sync_section(session, logger, args.base, section, sid, state,
+                         force=args.force, skip_index=args.skip_index)
         except Exception as e:
             logger.error(f"❌ Ошибка в разделе '{section}': {e}", exc_info=True)
 
     save_state(args.base, state)
     logger.info("=" * 60)
     logger.info("✅ Синхронизация завершена")
+    if args.skip_index:
+        logger.info("   Индексация отложена (--skip-index). "
+                    "Следующий sync без флага подхватит reindex_pending.json")
 
 if __name__ == "__main__":
     main()
