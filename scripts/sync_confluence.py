@@ -7,9 +7,11 @@ r"""
   0 21 * * * cd /путь/до/KISU\ Metro && .venv/bin/python sync_confluence.py >> sync.log 2>&1
 
 Индексация:
-  - обычный дифф → index_section.py батчами по PAGE_BATCH_SIZE page_id;
-  - «Стадии проекта» и дифф ≥ LARGE_DIFF_PAGES → полная resumable_index.py;
-  - сбой индексации → reindex_pending.json, повтор на следующем запуске.
+  - по умолчанию → index_section.py батчами по PAGE_BATCH_SIZE page_id
+    (в т.ч. «Стадии проекта» — инкремент, без полной пересборки);
+  - --full-reindex → для RESUMABLE_SECTIONS при большом диффе: resumable_index.py;
+  - сбой индексации → reindex_pending.json, повтор на следующем sync без --skip-index.
+  Cron обычно: sync_confluence.py --skip-index (только чанки).
 """
 import json, os, sys, time, argparse, logging, hashlib, shutil, subprocess
 from datetime import datetime, timezone
@@ -41,9 +43,9 @@ TIMEOUT = 30
 # только снижают риск timeout на одном огромном --pages.
 PAGE_BATCH_SIZE = 75
 PAGE_BATCH_TIMEOUT = 3600          # сек на один батч инкремента
-LARGE_DIFF_PAGES = 200             # порог «большого» диффа
+LARGE_DIFF_PAGES = 200             # порог для --full-reindex → resumable
 RESUMABLE_SECTIONS = {"Стадии проекта"}
-RESUMABLE_LOOP_TIMEOUT = 43200     # 12 ч на полный resumable-цикл
+RESUMABLE_LOOP_TIMEOUT = 43200     # 12 ч на полный resumable-цикл (--full-reindex)
 PENDING_REINDEX_FILE = "reindex_pending.json"
 
 # ── Утилиты ───────────────────────────────────────────────
@@ -370,6 +372,7 @@ def run_resumable_reindex(logger, base: str, section: str, python_bin: str) -> b
 
     env = os.environ.copy()
     env["KISU_METRO_BASE"] = base
+    env.setdefault("RESUMABLE_MAX_RUNTIME", "14400")  # хост: 4 ч на процесс
     for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(k, "4")
 
@@ -442,8 +445,13 @@ def run_batched_incremental_reindex(logger, base: str, section: str,
     logger.info("  ✅ Индекс обновлён (все батчи)")
     return True
 
-def reindex_section(logger, base: str, section: str, changed_page_ids: list) -> bool:
-    """Выбирает стратегию индексации и запускает её."""
+def reindex_section(logger, base: str, section: str, changed_page_ids: list,
+                    full_reindex: bool = False) -> bool:
+    """Выбирает стратегию индексации и запускает её.
+
+    По умолчанию — инкремент по page_id (в т.ч. «Стадии проекта»).
+    Полный resumable только при full_reindex и большом диффе в RESUMABLE_SECTIONS.
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     python_bin = _python_bin(script_dir)
 
@@ -458,15 +466,18 @@ def reindex_section(logger, base: str, section: str, changed_page_ids: list) -> 
         return False
 
     use_resumable = (
-        section in RESUMABLE_SECTIONS
+        full_reindex
+        and section in RESUMABLE_SECTIONS
         and len(changed_page_ids) >= LARGE_DIFF_PAGES
     )
     if use_resumable:
-        logger.info(f"  Дифф {len(changed_page_ids)} ≥ {LARGE_DIFF_PAGES} "
-                    f"для «{section}» → полная resumable-индексация "
-                    f"(точность = полный пересчёт по актуальных чанкам)")
+        logger.info(f"  --full-reindex: дифф {len(changed_page_ids)} ≥ {LARGE_DIFF_PAGES} "
+                    f"для «{section}» → полная resumable-индексация")
         ok = run_resumable_reindex(logger, base, section, python_bin)
     else:
+        if section in RESUMABLE_SECTIONS and len(changed_page_ids) >= LARGE_DIFF_PAGES:
+            logger.info(f"  Дифф {len(changed_page_ids)} стр. для «{section}» — "
+                        f"инкремент (полный resumable только с --full-reindex)")
         ok = run_batched_incremental_reindex(
             logger, base, section, changed_page_ids, python_bin
         )
@@ -479,7 +490,8 @@ def reindex_section(logger, base: str, section: str, changed_page_ids: list) -> 
 
 # ── Главный цикл ──────────────────────────────────────────
 def sync_section(session, logger, base: str, section: str, section_id: str,
-                 state: dict, force: bool = False, skip_index: bool = False):
+                 state: dict, force: bool = False, skip_index: bool = False,
+                 full_reindex: bool = False):
     logger.info(f"{'='*50}")
     logger.info(f"Синхронизация: {section} (ID={section_id})")
 
@@ -560,7 +572,8 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
     extra = f", pending={len(pending_ids)}" if pending_ids else ""
     logger.info(f"  Перестроение индекса ({len(reindex_ids)} стр.{extra})...")
     try:
-        reindex_section(logger, base, section, reindex_ids)
+        reindex_section(logger, base, section, reindex_ids,
+                        full_reindex=full_reindex)
     except Exception as e:
         logger.error(f"  ❌ Ошибка запуска индексации: {e}")
         mark_reindex_pending(base, section, reindex_ids)
@@ -574,8 +587,14 @@ def main():
     parser.add_argument("--skip-index", action="store_true",
                         help="Только чанки из Confluence, без переиндексации "
                              "(страницы пишутся в reindex_pending.json)")
+    parser.add_argument("--full-reindex", action="store_true",
+                        help="Для крупных диффов в RESUMABLE_SECTIONS — полная "
+                             "resumable-индексация вместо инкремента по page_id")
     parser.add_argument("--section", help="Синхронизировать только указанный раздел")
     args = parser.parse_args()
+
+    if args.skip_index and args.full_reindex:
+        parser.error("--skip-index и --full-reindex нельзя вместе")
 
     logger = setup_logging(args.base)
     state = load_state(args.base)
@@ -584,6 +603,8 @@ def main():
     mode = "FULL" if args.force else "INCREMENTAL"
     if args.skip_index:
         mode += "+SKIP_INDEX"
+    if args.full_reindex:
+        mode += "+FULL_REINDEX"
     logger.info(f"🚀 Синхронизация Confluence | Режим: {mode}")
     logger.info(f"   URL: {CONFLUENCE_URL}")
     logger.info(f"   BASE: {args.base}")
@@ -602,7 +623,8 @@ def main():
     for section, sid in sections_to_sync.items():
         try:
             sync_section(session, logger, args.base, section, sid, state,
-                         force=args.force, skip_index=args.skip_index)
+                         force=args.force, skip_index=args.skip_index,
+                         full_reindex=args.full_reindex)
         except Exception as e:
             logger.error(f"❌ Ошибка в разделе '{section}': {e}", exc_info=True)
 
@@ -611,7 +633,8 @@ def main():
     logger.info("✅ Синхронизация завершена")
     if args.skip_index:
         logger.info("   Индексация отложена (--skip-index). "
-                    "Следующий sync без флага подхватит reindex_pending.json")
+                    "Запустите sync без флага или index_section / ri_loop_host "
+                    "для reindex_pending.json")
 
 if __name__ == "__main__":
     main()

@@ -11,6 +11,8 @@ SAFE=$(echo "$SECTION" | tr " " "_" | tr -d "\"")
 LOGFILE="$LOG_DIR/index_${SAFE}_$(date +%Y%m%d_%H%M%S).log"
 export HF_HOME="${HF_HOME:-/app/backend/.deer-flow/users/e1e1bb08-dff7-4978-a378-c6a585a6a0fb/threads/e9a1a16a-5832-4326-bb1b-4bde19665b5e/user-data/workspace/.hf_cache}"
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4
+# Лимит песочницы DeerFlow ~600с — выходим раньше с чекпоинтом
+export RESUMABLE_MAX_RUNTIME="${RESUMABLE_MAX_RUNTIME:-540}"
 echo "==== $(date) ==== $SECTION ====" | tee -a "$LOGFILE"
 RUN=0
 while true; do

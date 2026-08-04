@@ -103,6 +103,16 @@ cd ~/is4brag && git pull && bash scripts/deploy.sh
 bash scripts/setup_cron.sh
 ```
 
+Cron тянет только чанки (`--skip-index`). Индекс — отдельно на хосте:
+
+```bash
+cd "/home/alex/Desktop/DeerFlow/WRITE_FOLDER/KISU Metro"
+.venv/bin/python sync_confluence.py          # pending + инкремент по page_id
+# полная пересборка «Стадий» (редко):
+# .venv/bin/python sync_confluence.py --full-reindex --section "Стадии проекта"
+# или: nohup ./ri_loop_host.sh "Стадии проекта" &
+```
+
 ## Требования
 
 - Python 3.10+

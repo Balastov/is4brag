@@ -7,6 +7,10 @@
 Запуск:
     python3 resumable_index.py "Стадии проекта"
     python3 resumable_index.py "Управление проектом"
+
+MAX_RUNTIME (сек на один процесс):
+  - по умолчанию 14400 (4 ч) — для хоста master@rag;
+  - в песочнице DeerFlow задайте RESUMABLE_MAX_RUNTIME=540 (ri_loop.sh).
 """
 import json, os, sys, pickle, time, argparse, signal, shutil
 
@@ -21,7 +25,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 MODEL_NAME = "intfloat/multilingual-e5-large"
 BATCH_SIZE = 64
 CHECKPOINT_EVERY = 10       # батчей между чекпоинтами
-MAX_RUNTIME = 540           # макс. секунд на запуск (в пределах 600с песочницы)
+# Хост: длинный прогон без частой перезагрузки модели. Песочница: RESUMABLE_MAX_RUNTIME=540.
+MAX_RUNTIME = int(os.environ.get("RESUMABLE_MAX_RUNTIME", "14400"))
 E5_PASSAGE_PREFIX = "passage: "
 # Базовый каталог с индексами (на сервере: /mnt/write/KISU Metro)
 BASE_DIR = os.environ.get("KISU_METRO_BASE", "/mnt/write/KISU Metro")

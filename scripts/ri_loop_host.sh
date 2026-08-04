@@ -46,6 +46,8 @@ export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export OPENBLAS_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
+# Хост: длинный слот без лишней перезагрузки e5-large (override: RESUMABLE_MAX_RUNTIME=...)
+export RESUMABLE_MAX_RUNTIME="${RESUMABLE_MAX_RUNTIME:-14400}"
 
 # --- Главный цикл ---
 echo "=========================================" | tee -a "$LOGFILE"
