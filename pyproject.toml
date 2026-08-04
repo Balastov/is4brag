@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "is4brag"
+version = "0.1.0"
+description = "Confluence ingestion and retrieval tooling for IS4B RAG"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.28",
+]
+
+[project.optional-dependencies]
+env = ["python-dotenv>=1.0"]
+index = [
+  "numpy>=1.23",
+  "scikit-learn>=1.2",
+  "sentence-transformers>=2.2",
+]
+onnx = [
+  "numpy>=1.23",
+  "onnxruntime>=1.16",
+  "transformers>=4.36",
+]
+onnx-export = [
+  "optimum[onnxruntime]>=1.16",
+  "sentence-transformers>=2.2",
+]
+qdrant = ["qdrant-client>=1.7"]
+api = [
+  "fastapi>=0.100",
+  "uvicorn>=0.23",
+  "qdrant-client>=1.7",
+  "numpy>=1.23",
+  "sentence-transformers>=2.2",
+]
+worker = [
+  "numpy>=1.23",
+  "sentence-transformers>=2.2",
+  "qdrant-client>=1.7",
+]
+dev = ["pytest>=7", "ruff>=0.5"]
+all = [
+  "python-dotenv>=1.0",
+  "numpy>=1.23",
+  "scikit-learn>=1.2",
+  "sentence-transformers>=2.2",
+  "qdrant-client>=1.7",
+  "onnxruntime>=1.16",
+  "transformers>=4.36",
+  "fastapi>=0.100",
+  "uvicorn>=0.23",
+]
+
+[tool.setuptools.packages.find]
+include = ["is4brag*"]
+
+[project.scripts]
+is4brag-index-worker = "is4brag.worker:main"
+is4brag-import-legacy = "is4brag.importer:main"
+is4brag-benchmark = "is4brag.benchmark:main"
+is4brag-search-api = "is4brag.api:main"
+is4brag-shadow-search = "is4brag.shadow:main"
+is4brag-ingest-worker = "is4brag.ingest:main"
+is4brag-duplicates = "is4brag.duplicates:main"
+is4brag-experiment = "is4brag.experiment:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100

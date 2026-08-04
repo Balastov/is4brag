@@ -1,0 +1,14 @@
+# Direct production and development dependencies pinned for repeatable host setup.
+# Install the project itself first: python -m pip install -e .
+requests==2.32.3
+python-dotenv==1.0.1
+numpy==1.26.4
+scikit-learn==1.5.2
+sentence-transformers==3.3.1
+qdrant-client==1.12.1
+onnxruntime==1.19.2
+transformers==4.46.3
+fastapi==0.115.5
+uvicorn==0.32.1
+pytest==8.3.4
+ruff==0.8.1

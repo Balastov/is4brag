@@ -1,0 +1,32 @@
+{
+  "schema_version": "2",
+  "queries": [
+    {
+      "id": "glossary-example",
+      "query": "Что означает сокращение КИСУ?",
+      "section": "Термины и сокращения",
+      "expected": {
+        "title_contains": ["Термины"],
+        "answer_contains": ["КИСУ"]
+      }
+    },
+    {
+      "id": "architecture-integration-example",
+      "query": "Какие интеграции описаны в целевой архитектуре?",
+      "section": "Архитектура",
+      "expected": {
+        "title_contains": ["архитектур"],
+        "answer_contains": ["интеграц"]
+      }
+    },
+    {
+      "id": "requirement-status-example",
+      "query": "Где описан статус требования?",
+      "section": "KISU Metro - Спецификации требований",
+      "expected": {
+        "title_contains": ["требован"],
+        "answer_contains": ["статус"]
+      }
+    }
+  ]
+}

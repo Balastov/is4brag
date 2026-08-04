@@ -14,8 +14,6 @@ import os
 import sys
 import pickle
 import time
-import numpy as np
-from sentence_transformers import SentenceTransformer
 
 # === Настройки ===
 INDEX_DIR = os.environ.get(
@@ -32,6 +30,13 @@ _cache = {}
 
 def load_index():
     """Загружает всё необходимое один раз."""
+    try:
+        import numpy as np
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise RuntimeError(
+            "Galaktika standalone search requires numpy and sentence-transformers"
+        ) from exc
     if _cache:
         return _cache
     
@@ -66,6 +71,7 @@ def load_index():
 
 def semantic_search(query, cache, top_k=30):
     """Поиск по косинусному сходству эмбеддингов."""
+    import numpy as np
     model = cache['model']
     embeddings = cache['embeddings']
     
@@ -92,6 +98,7 @@ def semantic_search(query, cache, top_k=30):
 
 def bm25_search(query, cache, top_k=30):
     """Поиск через BM25."""
+    import numpy as np
     bm25 = cache['bm25']
     tokenized_query = query.lower().split()
     

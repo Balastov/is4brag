@@ -10,8 +10,6 @@
 При первом запуске загружает индексы и модель (~35 сек).
 Общий объём: 18 964 чанка (6 331 Стадии проекта + 2 153 Спецификации + 3 375 Архитектура + 7 054 Управление проектом + 51 Термины), эмбеддинги 1024d (multilingual-e5-large).
 
-⚠️  Раздел «Стадии проекта» проиндексирован не полностью (4.8% на 2026-07-24).
-    После завершения общий объём составит ~76 000 чанков (~59k только Стадии проекта).
 """
 
 import json
@@ -19,11 +17,9 @@ import os
 import sys
 import pickle
 import time
-import numpy as np
-from sentence_transformers import SentenceTransformer
 
 # === Настройки ===
-BASE_DIR = "/mnt/write/KISU Metro"
+BASE_DIR = os.getenv("KISU_METRO_BASE", "/mnt/write/KISU Metro")
 ALL_SECTIONS = [
     "Стадии проекта",
     "KISU Metro - Спецификации требований",
@@ -39,10 +35,15 @@ E5_QUERY_PREFIX = "query: "
 _cache = {}          # section → {chunks, embeddings, vectorizer, matrix}
 _parents = {}        # section → {page_id: parent}
 _model = None        # общая модель (одна на все разделы)
+_np = None
 
 
 def load_section(section: str) -> dict:
     """Загружает индекс одного раздела."""
+    global _np
+    if _np is None:
+        import numpy
+        _np = numpy
     idx_dir = os.path.join(BASE_DIR, section)
 
     meta_path = os.path.join(idx_dir, "index_meta.json")
@@ -56,7 +57,7 @@ def load_section(section: str) -> dict:
     with open(os.path.join(idx_dir, "chunks_index.json")) as f:
         chunks = json.load(f)
 
-    embeddings = np.load(os.path.join(idx_dir, "embeddings.npy"))
+    embeddings = _np.load(os.path.join(idx_dir, "embeddings.npy"))
 
     with open(os.path.join(idx_dir, "bm25_index.pkl"), "rb") as f:
         bm25_data = pickle.load(f)
@@ -93,6 +94,7 @@ def load_all_indexes(sections=None):
 
     # Загружаем модель один раз
     if _model is None:
+        from sentence_transformers import SentenceTransformer
         for s in ALL_SECTIONS:
             meta_path = os.path.join(BASE_DIR, s, "index_meta.json")
             if os.path.exists(meta_path):
@@ -180,11 +182,11 @@ def semantic_search(query: str, section_data: dict, top_k: int = 30) -> list:
     # Для старых индексов без e5_prefixes — кодируем запрос как раньше (без префикса)
     q_text = (E5_QUERY_PREFIX + query) if section_data.get("meta", {}).get("e5_prefixes") else query
     q_emb = _model.encode([q_text])[0]
-    q_norm = q_emb / (np.linalg.norm(q_emb) + 1e-8)
-    d_norm = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
-    scores = np.dot(d_norm, q_norm)
+    q_norm = q_emb / (_np.linalg.norm(q_emb) + 1e-8)
+    d_norm = embeddings / (_np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
+    scores = _np.dot(d_norm, q_norm)
 
-    top_indices = np.argsort(-scores)[:top_k]
+    top_indices = _np.argsort(-scores)[:top_k]
     return [
         {"chunk_id": int(idx), "score": float(scores[idx]), "source": "semantic",
          "section": section_data["section"]}
@@ -200,8 +202,8 @@ def tfidf_search(query: str, section_data: dict, top_k: int = 30) -> list:
     q_vec = vectorizer.transform([query])
     scores = (matrix @ q_vec.T).toarray().ravel()
 
-    top_indices = np.argsort(-scores)[:top_k]
-    max_score = float(np.max(scores)) if np.max(scores) > 0 else 1.0
+    top_indices = _np.argsort(-scores)[:top_k]
+    max_score = float(_np.max(scores)) if _np.max(scores) > 0 else 1.0
 
     return [
         {"chunk_id": int(idx), "score": float(scores[idx]) / max_score, "source": "tfidf",
@@ -253,8 +255,8 @@ def hybrid_fusion(sem_results: list, tfidf_results: list, top_k: int = 10) -> li
     return results
 
 
-def search(query: str, top_k: int = 10, sections: list = None,
-           verbose: bool = False, use_parents: bool = True):
+def legacy_search(query: str, top_k: int = 10, sections: list = None,
+                  verbose: bool = False, use_parents: bool = True):
     """Гибридный поиск по всем (или указанным) разделам.
     
     use_parents=True: возвращает полные страницы (parent-child retrieval).
@@ -354,6 +356,41 @@ def search(query: str, top_k: int = 10, sections: list = None,
         results = resolve_parents(results)
 
     return results
+
+
+def _api_search(query: str, top_k: int, sections: list, use_parents: bool) -> list:
+    """Use only HTTP here; never invoke this script through a subprocess."""
+    from urllib.request import Request, urlopen
+
+    url = os.environ["SEARCH_API_URL"].rstrip("/") + "/search"
+    timeout = float(os.getenv("SEARCH_API_TIMEOUT", "15"))
+    payload = json.dumps({
+        "query": query,
+        "top_k": top_k,
+        "sections": sections,
+        "use_parents": use_parents,
+    }).encode("utf-8")
+    request = Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(request, timeout=timeout) as response:
+        decoded = json.loads(response.read().decode("utf-8"))
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("results"), list):
+        raise RuntimeError("search API returned an invalid response")
+    return decoded["results"]
+
+
+def search(query: str, top_k: int = 10, sections: list = None,
+           verbose: bool = False, use_parents: bool = True):
+    api_url = os.getenv("SEARCH_API_URL", "").strip()
+    if api_url:
+        try:
+            return _api_search(query, top_k, sections, use_parents)
+        except Exception as exc:
+            fallback = os.getenv("SEARCH_API_LEGACY_FALLBACK", "0").lower()
+            if fallback not in {"1", "true", "yes", "on"}:
+                raise
+            if verbose:
+                print("Search API unavailable, using legacy indexes: %s" % exc, file=sys.stderr)
+    return legacy_search(query, top_k, sections, verbose, use_parents)
 
 
 def format_context(results: list, query: str, use_parents: bool = False) -> str:

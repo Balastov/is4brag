@@ -115,6 +115,21 @@ SCRIPTS_COPY=(
     deploy.sh
     autodeploy_pull.sh
     setup_autodeploy.sh
+    report_metrics.py
+    index_worker.py
+    import_legacy.py
+    reconcile_store.py
+    install_worker_service.sh
+    benchmark_embeddings.py
+    requeue_model_version.py
+    manage_qdrant_alias.py
+    search_api.py
+    shadow_search.py
+    install_search_api_service.sh
+    ingest_event_worker.py
+    install_ingest_worker_service.sh
+    analyze_duplicates.py
+    run_experiment.py
 )
 
 for f in "${SCRIPTS_COPY[@]}"; do
@@ -130,6 +145,79 @@ for f in "${SCRIPTS_COPY[@]}"; do
     fi
     log "→ KISU: $f"
 done
+
+# Importable package → dedicated code-only directory. Runtime section folders,
+# chunks, state, pending work, locks, and indexes are never rsynced or deleted.
+PACKAGE_DEST="$KISU_BASE/is4brag"
+if [[ -w "$KISU_BASE" ]] && { [[ ! -e "$PACKAGE_DEST" ]] || [[ -w "$PACKAGE_DEST" ]]; }; then
+    mkdir -p "$PACKAGE_DEST"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' \
+            "$REPO_ROOT/is4brag/" "$PACKAGE_DEST/"
+    else
+        rm -rf "$PACKAGE_DEST"
+        mkdir -p "$PACKAGE_DEST"
+        cp -a "$REPO_ROOT/is4brag/." "$PACKAGE_DEST/"
+    fi
+else
+    if command -v rsync >/dev/null 2>&1; then
+        sudo mkdir -p "$PACKAGE_DEST"
+        sudo rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' \
+            "$REPO_ROOT/is4brag/" "$PACKAGE_DEST/"
+    else
+        sudo rm -rf "$PACKAGE_DEST"
+        sudo mkdir -p "$PACKAGE_DEST"
+        sudo cp -a "$REPO_ROOT/is4brag/." "$PACKAGE_DEST/"
+    fi
+    sudo chown -R "$(id -u):$(id -g)" "$PACKAGE_DEST" 2>/dev/null || true
+fi
+log "→ KISU: is4brag package"
+for metadata in pyproject.toml requirements.lock; do
+    if [[ -w "$KISU_BASE" ]] \
+        && { [[ ! -e "$KISU_BASE/$metadata" ]] || [[ -w "$KISU_BASE/$metadata" ]]; }; then
+        install -m 0644 "$REPO_ROOT/$metadata" "$KISU_BASE/$metadata"
+    else
+        sudo install -m 0644 -o "$(id -u)" -g "$(id -g)" \
+            "$REPO_ROOT/$metadata" "$KISU_BASE/$metadata"
+    fi
+done
+log "→ KISU: Python project metadata"
+
+# Worker service and local Qdrant templates (installation remains an explicit ops step).
+if [[ -w "$KISU_BASE" ]]; then
+    install -d -m 0755 "$KISU_BASE/systemd"
+    install -m 0644 "$REPO_ROOT/systemd/is4brag-index-worker.service" \
+        "$KISU_BASE/systemd/is4brag-index-worker.service"
+    install -m 0644 "$REPO_ROOT/systemd/worker.env.example" \
+        "$KISU_BASE/systemd/worker.env.example"
+    install -m 0644 "$REPO_ROOT/systemd/is4brag-search-api.service" \
+        "$KISU_BASE/systemd/is4brag-search-api.service"
+    install -m 0644 "$REPO_ROOT/systemd/search-api.env.example" \
+        "$KISU_BASE/systemd/search-api.env.example"
+    install -m 0644 "$REPO_ROOT/systemd/is4brag-ingest-event-worker.service" \
+        "$KISU_BASE/systemd/is4brag-ingest-event-worker.service"
+    install -m 0644 "$REPO_ROOT/systemd/ingest-worker.env.example" \
+        "$KISU_BASE/systemd/ingest-worker.env.example"
+    install -m 0644 "$REPO_ROOT/docker-compose.qdrant.yml" \
+        "$KISU_BASE/docker-compose.qdrant.yml"
+else
+    sudo install -d -m 0755 "$KISU_BASE/systemd"
+    sudo install -m 0644 "$REPO_ROOT/systemd/is4brag-index-worker.service" \
+        "$KISU_BASE/systemd/is4brag-index-worker.service"
+    sudo install -m 0644 "$REPO_ROOT/systemd/worker.env.example" \
+        "$KISU_BASE/systemd/worker.env.example"
+    sudo install -m 0644 "$REPO_ROOT/systemd/is4brag-search-api.service" \
+        "$KISU_BASE/systemd/is4brag-search-api.service"
+    sudo install -m 0644 "$REPO_ROOT/systemd/search-api.env.example" \
+        "$KISU_BASE/systemd/search-api.env.example"
+    sudo install -m 0644 "$REPO_ROOT/systemd/is4brag-ingest-event-worker.service" \
+        "$KISU_BASE/systemd/is4brag-ingest-event-worker.service"
+    sudo install -m 0644 "$REPO_ROOT/systemd/ingest-worker.env.example" \
+        "$KISU_BASE/systemd/ingest-worker.env.example"
+    sudo install -m 0644 "$REPO_ROOT/docker-compose.qdrant.yml" \
+        "$KISU_BASE/docker-compose.qdrant.yml"
+fi
+log "→ KISU: worker/Qdrant templates"
 
 # ── 2. Skills → DeerFlow skills/public ──
 SKILLS_DEST="$(detect_skills_public)"
@@ -152,7 +240,18 @@ VENV_PY="$KISU_BASE/.venv/bin/python"
 if [[ -x "$VENV_PY" ]]; then
     "$VENV_PY" -m py_compile "$KISU_BASE/sync_confluence.py" \
         "$KISU_BASE/index_section.py" \
-        "$KISU_BASE/resumable_index.py"
+        "$KISU_BASE/resumable_index.py" \
+        "$KISU_BASE/report_metrics.py" \
+        "$KISU_BASE/index_worker.py" \
+        "$KISU_BASE/import_legacy.py" \
+        "$KISU_BASE/reconcile_store.py" \
+        "$KISU_BASE/benchmark_embeddings.py" \
+        "$KISU_BASE/requeue_model_version.py" \
+        "$KISU_BASE/manage_qdrant_alias.py" \
+        "$KISU_BASE/search_api.py" \
+        "$KISU_BASE/shadow_search.py" \
+        "$KISU_BASE/ingest_event_worker.py" \
+        "$KISU_BASE"/is4brag/*.py
     log "py_compile OK"
 else
     log "WARN: нет $VENV_PY — py_compile пропущен"

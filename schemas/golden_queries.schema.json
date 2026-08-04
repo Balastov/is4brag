@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://is4brag.local/schemas/golden_queries.schema.json",
+  "title": "IS4B RAG golden queries",
+  "type": "object",
+  "required": ["schema_version", "queries"],
+  "properties": {
+    "schema_version": {"enum": ["1", "2"]},
+    "queries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "query", "expected"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "query": {"type": "string", "minLength": 1},
+          "section": {"type": "string"},
+          "expected": {
+            "type": "object",
+            "minProperties": 1,
+            "properties": {
+              "page_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1, "pattern": "^(?!<.*>$)(?!.*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]).+$"}
+              },
+              "title_contains": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1}
+              },
+              "answer_contains": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1}
+              }
+            },
+            "anyOf": [
+              {"required": ["page_ids"]},
+              {"required": ["title_contains"]},
+              {"required": ["answer_contains"]}
+            ],
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

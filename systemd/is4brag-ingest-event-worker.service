@@ -1,0 +1,20 @@
+[Unit]
+Description=IS4B RAG Confluence ingest event worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+EnvironmentFile=@ENV_PATH@
+WorkingDirectory=@BASE_PATH@
+ExecStart="@PYTHON_PATH@" -m is4brag.ingest
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

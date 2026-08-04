@@ -13,31 +13,59 @@ r"""
   - сбой индексации → reindex_pending.json, повтор на следующем sync без --skip-index.
   Cron обычно: sync_confluence.py --skip-index (только чанки).
 """
-import json, os, sys, time, argparse, logging, hashlib, shutil, subprocess
+import json, os, sys, time, argparse, logging, shutil, subprocess
 from datetime import datetime, timezone
-import requests
-from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+try:
+    import requests
+except ImportError:  # Keep normalization/state helpers importable in minimal environments.
+    requests = None
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+from is4brag.config import DEFAULT_SECTIONS, Settings
+from is4brag.content import (
+    chunk_text as _chunk_text,
+    html_to_text as _html_to_text,
+    normalize_html as _normalize_html,
+    page_breadcrumbs as _page_breadcrumbs,
+    page_to_chunks as _page_to_chunks,
+)
+from is4brag.io import FileLock, atomic_write_json, atomic_write_jsonl
+from is4brag.reconcile import append_tombstones, make_tombstones, reconcile_chunks
+from is4brag.store import CanonicalStore
+from is4brag.state import (
+    load_state as _load_state,
+    save_state as _save_state,
+    section_state,
+)
+
+if load_dotenv:
+    load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
+    load_dotenv(os.path.join(REPO_ROOT, ".env"))
+
+SETTINGS = Settings.from_env()
 
 # ── Конфигурация ──────────────────────────────────────────
-CONFLUENCE_URL = "https://conf-metro.ibs.ru"
-PAT = os.getenv("CONFLUENCE_PAT", "")
+CONFLUENCE_URL = SETTINGS.confluence_url
+PAT = SETTINGS.confluence_pat
 
 # Разделы для синхронизации: {название: page_id}
-SECTIONS = {
-    "Термины и сокращения": "1933357",
-    "Управление проектом": "1933362",
-    "Стадии проекта": "1933363",
-    "Архитектура": "2820058",
-    "KISU Metro - Спецификации требований": "1933456",
-}
+SECTIONS = dict(DEFAULT_SECTIONS)
 
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 150
-MIN_CHUNK_LEN = 100
-WORKERS = 5
-TIMEOUT = 30
+CHUNK_SIZE = SETTINGS.chunk_size
+CHUNK_OVERLAP = SETTINGS.chunk_overlap
+MIN_CHUNK_LEN = SETTINGS.min_chunk_len
+WORKERS = SETTINGS.workers
+TIMEOUT = SETTINGS.request_timeout
 
 # Индексация: батчи не меняют итоговый индекс (тот же keep/replace + полный BM25),
 # только снижают риск timeout на одном огромном --pages.
@@ -111,36 +139,7 @@ def html_to_text(raw: str) -> str:
     HTML storage Confluence → plain text.
     Таблицы сохраняются построчно с метками «строка N», остальное — с переносами.
     """
-    import re
-    if not raw:
-        return ""
-    text = re.sub(r'<style[^>]*>.*?</style>', '', raw, flags=re.I | re.DOTALL)
-    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.I | re.DOTALL)
-
-    table_idx = 0
-
-    def _replace_table(match):
-        nonlocal table_idx
-        table_idx += 1
-        converted = _table_to_text(match.group(0), table_idx)
-        return "\n" + converted + "\n" if converted else "\n"
-
-    text = re.sub(r'<table[^>]*>.*?</table>', _replace_table, text, flags=re.I | re.DOTALL)
-    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.I)
-    text = re.sub(r'</p\s*>', '\n', text, flags=re.I)
-    text = re.sub(r'</h[1-6]\s*>', '\n', text, flags=re.I)
-    text = re.sub(r'</tr\s*>', '\n', text, flags=re.I)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = _unescape_html(text)
-    # Сжимаем пробелы внутри строк, пустые строки — одна
-    lines = []
-    for line in text.splitlines():
-        line = re.sub(r'[ \t]+', ' ', line).strip()
-        if line:
-            lines.append(line)
-        elif lines and lines[-1] != "":
-            lines.append("")
-    return "\n".join(lines).strip()
+    return _html_to_text(raw)
 
 # Обратная совместимость для внешних вызовов/тестов
 def clean_html(raw: str) -> str:
@@ -149,96 +148,18 @@ def clean_html(raw: str) -> str:
 
 def page_breadcrumbs(page: dict) -> str:
     """Путь ancestors + title страницы: «Раздел > … > ПР_…»."""
-    parts = []
-    for anc in page.get("ancestors") or []:
-        t = (anc.get("title") or "").strip()
-        if t:
-            parts.append(t)
-    title = (page.get("title") or "").strip()
-    if title and (not parts or parts[-1] != title):
-        parts.append(title)
-    return " > ".join(parts)
+    return _page_breadcrumbs(page)
 
 def chunk_text(text: str) -> list[str]:
     """
     Чанкирование с предпочтением границ строк (строки таблиц не режутся посередине,
     если строка короче CHUNK_SIZE).
     """
-    if not text or not text.strip():
-        return []
+    return _chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP, MIN_CHUNK_LEN)
 
-    lines = text.split("\n")
-    chunks = []
-    buf: list[str] = []
-    buf_len = 0
-
-    def _flush(overlap: bool):
-        nonlocal buf, buf_len
-        chunk = "\n".join(buf).strip()
-        if len(chunk) >= MIN_CHUNK_LEN:
-            chunks.append(chunk)
-        if not overlap or not buf:
-            buf, buf_len = [], 0
-            return
-        # overlap по хвосту ~CHUNK_OVERLAP символов
-        kept: list[str] = []
-        ol = 0
-        for line in reversed(buf):
-            add = len(line) + (1 if kept else 0)
-            if kept and ol + add > CHUNK_OVERLAP:
-                break
-            kept.insert(0, line)
-            ol += add
-        buf, buf_len = kept, sum(len(x) + 1 for x in kept)
-
-    for line in lines:
-        # Очень длинная строка — режем по символам
-        if len(line) > CHUNK_SIZE:
-            if buf:
-                _flush(overlap=True)
-            start = 0
-            while start < len(line):
-                piece = line[start:start + CHUNK_SIZE].strip()
-                if len(piece) >= MIN_CHUNK_LEN:
-                    chunks.append(piece)
-                start += CHUNK_SIZE - CHUNK_OVERLAP
-            continue
-
-        add_len = len(line) + (1 if buf else 0)
-        if buf and buf_len + add_len > CHUNK_SIZE:
-            _flush(overlap=True)
-        buf.append(line)
-        buf_len += add_len
-
-    if buf:
-        _flush(overlap=False)
-    return chunks
-
-def page_to_chunks(page: dict) -> list[dict]:
+def page_to_chunks(page: dict, section: str = "") -> list[dict]:
     """Конвертирует страницу Confluence в чанки (таблицы + breadcrumbs)."""
-    body = page.get("body", {}).get("storage", {}).get("value", "")
-    title = page.get("title", "Без названия")
-    page_id = page.get("id", "")
-    url = f"{CONFLUENCE_URL}/spaces/METRO/pages/{page_id}"
-    breadcrumbs = page_breadcrumbs(page)
-    body_text = html_to_text(body)
-    header = f"Путь: {breadcrumbs}\nЗаголовок: {title}\n\n" if breadcrumbs else f"Заголовок: {title}\n\n"
-
-    chunks = []
-    for i, chunk in enumerate(chunk_text(body_text)):
-        chunk_id = hashlib.md5(f"{page_id}_{i}".encode()).hexdigest()[:12]
-        chunks.append({
-            "chunk_id": chunk_id,
-            "page_id": page_id,
-            "title": title,
-            "url": url,
-            "breadcrumbs": breadcrumbs,
-            "text": header + chunk,
-            "chunk_index": i,
-        })
-    # Страница без тела, но с заголовком — один короткий чанк-заглушка не создаём
-    # (MIN_CHUNK_LEN отфильтрует). Если только title важен — он в breadcrumbs соседних.
-    return chunks
+    return _page_to_chunks(page, section, SETTINGS)
 
 # ── Проверка изменений ────────────────────────────────────
 def _format_cql_date(iso_str: str) -> str:
@@ -293,33 +214,39 @@ def get_changed_pages(session, section_id: str, since: str = None) -> list[dict]
             break
         start += limit
 
-    # ── Fallback: если потомков нет, забираем саму страницу ──
-    if not pages:
-        page = api_get(session, f"content/{section_id}",
-                       {"expand": "body.storage,version,ancestors,space"})
-        if page:
-            # Проверяем дату модификации только при инкрементальной синхронизации
-            if since:
-                modified = page.get("version", {}).get("when", "")
-                if modified and _parse_date(modified) < _parse_date(since):
-                    return []  # страница не менялась — пропускаем
-            pages = [page]
+    # The section root is not included by ancestor=... and must be checked
+    # independently even when descendants also changed.
+    root = api_get(session, f"content/{section_id}",
+                   {"expand": "body.storage,version,ancestors,space"})
+    if root:
+        include_root = True
+        if since:
+            modified = _parse_date(root.get("version", {}).get("when", ""))
+            watermark = _parse_date(since)
+            include_root = modified is None or watermark is None or modified >= watermark
+        if include_root:
+            pages.append(root)
 
-    return pages
+    return list({str(page.get("id", "")): page for page in pages}.values())
+
+
+def get_section_inventory(session, section_id: str) -> list[dict]:
+    """Return every descendant plus the section root, de-duplicated by page ID."""
+    pages = get_changed_pages(session, section_id, None)
+    by_id = {str(page.get("id", "")): page for page in pages}
+    return list(by_id.values())
 
 # ── Сохранение состояния ──────────────────────────────────
 def load_state(base: str) -> dict:
-    path = os.path.join(base, "sync_state.json")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return {"last_sync": None, "page_versions": {}}
+    return _load_state(base, SECTIONS)
 
-def save_state(base: str, state: dict):
-    # Формат: «2026-07-19T14:49:49+00:00» — совместим с datetime.fromisoformat()
-    state["last_sync"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
-    with open(os.path.join(base, "sync_state.json"), "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+def save_state(
+    base: str,
+    state: dict,
+    completed_section: str = None,
+    checkpoint: str = None,
+):
+    _save_state(base, state, completed_section, checkpoint)
 
 def _pending_path(base: str) -> str:
     return os.path.join(base, PENDING_REINDEX_FILE)
@@ -337,8 +264,7 @@ def save_pending_reindex(base: str, pending: dict):
         if os.path.exists(path):
             os.remove(path)
         return
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(pending, f, ensure_ascii=False, indent=2)
+    atomic_write_json(Path(path), pending)
 
 def mark_reindex_pending(base: str, section: str, page_ids: list):
     pending = load_pending_reindex(base)
@@ -351,6 +277,16 @@ def clear_reindex_pending(base: str, section: str):
     if section in pending:
         pending.pop(section, None)
         save_pending_reindex(base, pending)
+
+
+def clear_processed_pending(base: str, section: str, page_ids):
+    pending = load_pending_reindex(base)
+    remaining = set(pending.get(section, [])) - set(page_ids)
+    if remaining:
+        pending[section] = sorted(remaining)
+    else:
+        pending.pop(section, None)
+    save_pending_reindex(base, pending)
 
 def _python_bin(script_dir: str) -> str:
     venv_python = os.path.join(script_dir, ".venv", "bin", "python")
@@ -491,7 +427,8 @@ def reindex_section(logger, base: str, section: str, changed_page_ids: list,
 # ── Главный цикл ──────────────────────────────────────────
 def sync_section(session, logger, base: str, section: str, section_id: str,
                  state: dict, force: bool = False, skip_index: bool = False,
-                 full_reindex: bool = False):
+                 full_reindex: bool = False, reconcile: bool = False,
+                 canonical_store=None, model_version: str = None):
     logger.info(f"{'='*50}")
     logger.info(f"Синхронизация: {section} (ID={section_id})")
 
@@ -499,23 +436,39 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
     os.makedirs(out_dir, exist_ok=True)
     chunks_path = os.path.join(out_dir, "chunks_export.jsonl")
 
-    # 1. Проверяем изменения
-    since = None if force else state.get("last_sync")
-    pages = get_changed_pages(session, section_id, since)
+    current_state = section_state(state, section)
+    # Reconciliation deliberately inventories the entire section. Incremental runs
+    # keep the existing CQL query and therefore preserve the old CLI's cost profile.
+    since = None if (force or reconcile) else current_state.get("last_sync")
+    fetched_pages = (
+        get_section_inventory(session, section_id)
+        if reconcile
+        else get_changed_pages(session, section_id, since)
+    )
+    inventory_ids = {str(page["id"]) for page in fetched_pages} if reconcile else set()
+    pages = fetched_pages
+    if reconcile and not force:
+        versions = current_state.get("page_versions", {})
+        pages = [
+            page for page in fetched_pages
+            if page.get("version", {}).get("number", 0) > versions.get(str(page["id"]), 0)
+        ]
     logger.info(f"  Изменённых страниц: {len(pages)}")
 
     pending = load_pending_reindex(base)
     pending_ids = list(pending.get(section, []))
 
-    if not pages and not force and not pending_ids:
+    if not pages and not force and not pending_ids and not reconcile:
         logger.info(f"  Нет изменений — пропускаем")
-        return
+        return True
 
     # 2. Загружаем существующие чанки (сгруппированные по page_id)
     existing = {}  # {page_id: [chunk_dicts]}
     if os.path.exists(chunks_path):
         with open(chunks_path, encoding="utf-8") as f:
             for line in f:
+                if not line.strip():
+                    continue
                 c = json.loads(line)
                 pid = c["page_id"]
                 if pid not in existing:
@@ -526,48 +479,122 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
     updated_count = 0
     skipped_count = 0
     changed_page_ids = []  # page_id, для которых реально обновлены чанки
+    changed_pages = {}
 
     for page in pages:
-        pid = page["id"]
+        pid = str(page["id"])
         new_version = page.get("version", {}).get("number", 0)
-        old_version = state.get("page_versions", {}).get(pid, 0)
+        old_version = current_state.get("page_versions", {}).get(pid, 0)
 
         if new_version <= old_version and not force:
             skipped_count += 1
             continue
 
-        chunks = page_to_chunks(page)
+        chunks = page_to_chunks(page, section)
         existing[pid] = chunks  # заменяем все чанки страницы целиком
+        changed_pages[pid] = page
         updated_count += len(chunks)
         changed_page_ids.append(pid)
 
-        state["page_versions"][pid] = new_version
+        current_state["page_versions"][pid] = new_version
+
+    stale_page_ids = set()
+    if reconcile:
+        flattened = [chunk for page_chunks in existing.values() for chunk in page_chunks]
+        known_page_ids = (
+            set(map(str, current_state.get("inventory", [])))
+            | set(map(str, current_state.get("page_versions", {}).keys()))
+        )
+        if current_state.get("ownership_known", False):
+            _, stale_page_ids = reconcile_chunks(flattened, inventory_ids, known_page_ids)
+        else:
+            logger.info("  Первый authoritative inventory: удаления отложены до следующей сверки")
+        for pid in stale_page_ids:
+            existing.pop(pid, None)
+            current_state["page_versions"].pop(pid, None)
+        current_state["inventory"] = sorted(inventory_ids)
+        current_state["ownership_known"] = True
+        tombstones = make_tombstones(section, stale_page_ids)
+        append_tombstones(Path(base) / "tombstones.jsonl", tombstones)
+        if stale_page_ids:
+            logger.info(f"  Удалено отсутствующих страниц: {len(stale_page_ids)}")
 
     # 4. Перезаписываем chunks_export.jsonl (только если были обновления чанков)
     all_chunks = []
     for chunks_list in existing.values():
         all_chunks.extend(chunks_list)
 
-    if updated_count > 0:
-        with open(chunks_path, "w", encoding="utf-8") as f:
-            for c in all_chunks:
-                f.write(json.dumps(c, ensure_ascii=False) + "\n")
+    if changed_page_ids or stale_page_ids:
+        atomic_write_jsonl(Path(chunks_path), all_chunks)
         logger.info(f"  Всего чанков: {len(all_chunks)} "
                     f"(добавлено: {updated_count}, без изменений: {skipped_count})")
     elif pending_ids:
         logger.info(f"  Чанки без изменений Confluence; pending reindex: {len(pending_ids)} стр.")
 
+    # SQLite is canonical when configured, while JSONL remains a compatibility export.
+    canonical_queue = canonical_store is not None
+    if canonical_queue:
+        # Once an active canonical store has accepted any work, failure must abort
+        # the section so its watermark cannot advance past a partial SQLite write.
+        for pid in changed_page_ids:
+            page = changed_pages[pid]
+            page_chunks = existing.get(pid, [])
+            canonical_store.replace_page(
+                {
+                    "page_id": pid,
+                    "section": section,
+                    "title": page.get("title", ""),
+                    "url": (
+                        f"{CONFLUENCE_URL}/spaces/METRO/pages/{pid}"
+                    ),
+                    "breadcrumbs": page_breadcrumbs(page),
+                    "confluence_version": page.get("version", {}).get("number", 0),
+                    "schema_version": SETTINGS.schema_version,
+                    "source": page,
+                    "source_text": _normalize_html(
+                        page.get("body", {}).get("storage", {}).get("value", "")
+                    ).text,
+                    "parent_text": _normalize_html(
+                        page.get("body", {}).get("storage", {}).get("value", "")
+                    ).text,
+                },
+                page_chunks,
+                model_version or SETTINGS.model_version,
+            )
+        for pid in stale_page_ids:
+            canonical_store.tombstone_page(
+                pid, model_version or SETTINGS.model_version
+            )
+        if changed_page_ids or stale_page_ids:
+            logger.info(
+                f"  SQLite queue: обновлено={len(changed_page_ids)}, "
+                f"удалено={len(stale_page_ids)}"
+            )
+
     # 5. Перестраиваем индекс (новые изменения + незавершённые с прошлых запусков)
-    reindex_ids = list(dict.fromkeys(changed_page_ids + pending_ids))
+    reindex_ids = list(dict.fromkeys(changed_page_ids + sorted(stale_page_ids) + pending_ids))
     if not reindex_ids or not os.path.exists(chunks_path):
-        return
+        return True
+
+    if canonical_queue:
+        # The autonomous worker owns indexing; ingest must never launch a model process.
+        canonical_ids = changed_page_ids + sorted(stale_page_ids)
+        clear_processed_pending(base, section, canonical_ids)
+        if pending_ids and not canonical_ids:
+            logger.warning(
+                "  Legacy pending не импортирован в SQLite; запустите import_legacy.py"
+            )
+        logger.info(
+            f"  SQLite queue приняла {len(canonical_ids)} page_id; indexer не запускается"
+        )
+        return True
 
     if skip_index:
         # Только обновить чанки; индекс — позже (pending подхватит следующий sync без --skip-index)
         mark_reindex_pending(base, section, reindex_ids)
         logger.info(f"  ⏸  --skip-index: индексация отложена "
                     f"({len(reindex_ids)} стр. → reindex_pending.json)")
-        return
+        return True
 
     extra = f", pending={len(pending_ids)}" if pending_ids else ""
     logger.info(f"  Перестроение индекса ({len(reindex_ids)} стр.{extra})...")
@@ -577,6 +604,7 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
     except Exception as e:
         logger.error(f"  ❌ Ошибка запуска индексации: {e}")
         mark_reindex_pending(base, section, reindex_ids)
+    return True
 
 def main():
     parser = argparse.ArgumentParser(description="Инкрементальная синхронизация Confluence")
@@ -591,6 +619,18 @@ def main():
                         help="Для крупных диффов в RESUMABLE_SECTIONS — полная "
                              "resumable-индексация вместо инкремента по page_id")
     parser.add_argument("--section", help="Синхронизировать только указанный раздел")
+    parser.add_argument("--reconcile", action="store_true",
+                        help="Сверить полный состав страниц и удалить отсутствующие")
+    canonical_group = parser.add_mutually_exclusive_group()
+    canonical_group.add_argument(
+        "--canonical-store", dest="canonical_store", action="store_true",
+        help="Писать SQLite и ставить задания автономному index worker",
+    )
+    canonical_group.add_argument(
+        "--no-canonical-store", dest="canonical_store", action="store_false",
+        help="Отключить SQLite и сохранить прежний запуск index_section.py",
+    )
+    parser.set_defaults(canonical_store=None)
     args = parser.parse_args()
 
     if args.skip_index and args.full_reindex:
@@ -598,6 +638,17 @@ def main():
 
     logger = setup_logging(args.base)
     state = load_state(args.base)
+    env_canonical = os.getenv("IS4BRAG_CANONICAL_STORE", "1").lower() not in {
+        "0", "false", "no", "off"
+    }
+    canonical_enabled = env_canonical if args.canonical_store is None else args.canonical_store
+    canonical_store = None
+    if canonical_enabled:
+        try:
+            settings = Settings.from_env(args.base)
+            canonical_store = CanonicalStore(settings.sqlite_path)
+        except Exception as exc:
+            logger.error(f"⚠️ SQLite недоступен; используется legacy fallback: {exc}")
 
     logger.info("=" * 60)
     mode = "FULL" if args.force else "INCREMENTAL"
@@ -605,11 +656,15 @@ def main():
         mode += "+SKIP_INDEX"
     if args.full_reindex:
         mode += "+FULL_REINDEX"
+    if args.reconcile:
+        mode += "+RECONCILE"
     logger.info(f"🚀 Синхронизация Confluence | Режим: {mode}")
     logger.info(f"   URL: {CONFLUENCE_URL}")
     logger.info(f"   BASE: {args.base}")
     logger.info(f"   PID: {os.getpid()}")
 
+    if requests is None:
+        parser.error("requests не установлен; установите пакет: pip install -e .")
     session = requests.Session()
     session.headers.update({"Authorization": f"Bearer {PAT}"})
 
@@ -620,21 +675,58 @@ def main():
             sys.exit(1)
         sections_to_sync = {args.section: SECTIONS[args.section]}
 
-    for section, sid in sections_to_sync.items():
-        try:
-            sync_section(session, logger, args.base, section, sid, state,
-                         force=args.force, skip_index=args.skip_index,
-                         full_reindex=args.full_reindex)
-        except Exception as e:
-            logger.error(f"❌ Ошибка в разделе '{section}': {e}", exc_info=True)
-
-    save_state(args.base, state)
+    failed_sections = []
+    try:
+        with FileLock(Path(args.base) / ".sync_confluence.lock", timeout=0):
+            for section, sid in sections_to_sync.items():
+                # Persist the pre-query watermark only after the section succeeds.
+                # CQL minute precision supplies an overlap on the next run.
+                query_watermark = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
+                run_id = (
+                    canonical_store.start_sync_run(section)
+                    if canonical_store is not None
+                    else None
+                )
+                try:
+                    sync_section(session, logger, args.base, section, sid, state,
+                                 force=args.force, skip_index=args.skip_index,
+                                 full_reindex=args.full_reindex,
+                                 reconcile=args.reconcile,
+                                 canonical_store=canonical_store,
+                                 model_version=SETTINGS.model_version)
+                    # A crash in a later section cannot lose an earlier checkpoint.
+                    save_state(
+                        args.base,
+                        state,
+                        completed_section=section,
+                        checkpoint=query_watermark,
+                    )
+                    if run_id is not None:
+                        canonical_store.finish_sync_run(run_id, "completed")
+                except Exception as e:
+                    if run_id is not None:
+                        canonical_store.finish_sync_run(run_id, "failed", error=str(e))
+                    logger.error(f"❌ Ошибка в разделе '{section}': {e}", exc_info=True)
+                    failed_sections.append(section)
+    except TimeoutError as e:
+        logger.error(f"❌ {e}")
+        return 2
+    finally:
+        if canonical_store is not None:
+            canonical_store.close()
     logger.info("=" * 60)
+    if failed_sections:
+        logger.error(
+            "❌ Синхронизация завершилась с ошибками: %s",
+            ", ".join(failed_sections),
+        )
+        return 1
     logger.info("✅ Синхронизация завершена")
     if args.skip_index:
         logger.info("   Индексация отложена (--skip-index). "
                     "Запустите sync без флага или index_section / ri_loop_host "
                     "для reindex_pending.json")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
