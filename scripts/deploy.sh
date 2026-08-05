@@ -183,6 +183,32 @@ for metadata in pyproject.toml requirements.lock; do
 done
 log "→ KISU: Python project metadata"
 
+# Golden dataset / quality-gate fixtures → code-only directory, mirrored like the package.
+FIXTURES_DEST="$KISU_BASE/fixtures"
+if [[ -d "$REPO_ROOT/fixtures" ]]; then
+    if [[ -w "$KISU_BASE" ]] && { [[ ! -e "$FIXTURES_DEST" ]] || [[ -w "$FIXTURES_DEST" ]]; }; then
+        mkdir -p "$FIXTURES_DEST"
+        if command -v rsync >/dev/null 2>&1; then
+            rsync -a --delete "$REPO_ROOT/fixtures/" "$FIXTURES_DEST/"
+        else
+            rm -rf "$FIXTURES_DEST"
+            mkdir -p "$FIXTURES_DEST"
+            cp -a "$REPO_ROOT/fixtures/." "$FIXTURES_DEST/"
+        fi
+    else
+        sudo mkdir -p "$FIXTURES_DEST"
+        if command -v rsync >/dev/null 2>&1; then
+            sudo rsync -a --delete "$REPO_ROOT/fixtures/" "$FIXTURES_DEST/"
+        else
+            sudo rm -rf "$FIXTURES_DEST"
+            sudo mkdir -p "$FIXTURES_DEST"
+            sudo cp -a "$REPO_ROOT/fixtures/." "$FIXTURES_DEST/"
+        fi
+        sudo chown -R "$(id -u):$(id -g)" "$FIXTURES_DEST" 2>/dev/null || true
+    fi
+    log "→ KISU: fixtures (golden dataset)"
+fi
+
 # Worker service and local Qdrant templates (installation remains an explicit ops step).
 if [[ -w "$KISU_BASE" ]]; then
     install -d -m 0755 "$KISU_BASE/systemd"
