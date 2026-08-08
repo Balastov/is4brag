@@ -72,13 +72,20 @@ class QdrantAdapter:
 
     def ensure_collection(self) -> None:
         client, models = self._load()
-        if not client.collection_exists(self.collection):
+        if client.collection_exists(self.collection):
+            return
+        try:
             client.create_collection(
                 collection_name=self.collection,
                 vectors_config=models.VectorParams(
                     size=self.dimensions, distance=models.Distance.COSINE
                 ),
             )
+        except Exception:
+            # Concurrent workers race here on first start; losing the race is
+            # only an error if the collection still does not exist afterwards.
+            if not client.collection_exists(self.collection):
+                raise
 
     def upsert(
         self,
