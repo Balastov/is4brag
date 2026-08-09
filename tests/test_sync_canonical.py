@@ -222,6 +222,62 @@ class CanonicalSyncTests(unittest.TestCase):
                 sync._format_cql_date(prequery), "2026-01-01 10:00"
             )
 
+    def test_canonical_drains_legacy_reindex_pending_into_sqlite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            section_dir = base / "Section"
+            section_dir.mkdir()
+            chunk = {
+                "chunk_id": "pending-chunk-1",
+                "page_id": "pending-page",
+                "section": "Section",
+                "title": "Pending Page",
+                "url": "https://example/pages/pending-page",
+                "breadcrumbs": "Section",
+                "text": "legacy pending content " * 20,
+                "content_hash": "hash-pending",
+                "chunker_version": "3",
+                "schema_version": "2",
+            }
+            (section_dir / "chunks_export.jsonl").write_text(
+                json.dumps(chunk, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            sync.save_pending_reindex(temporary, {"Section": ["pending-page"]})
+            store = CanonicalStore(base / "db.sqlite3")
+            state = migrate_state(
+                {
+                    "sections": {
+                        "Section": {
+                            "last_sync": "2026-08-08T21:00:00+0000",
+                            "page_versions": {"pending-page": 3},
+                            "inventory": ["pending-page"],
+                            "ownership_known": True,
+                        }
+                    }
+                },
+                ["Section"],
+            )
+            with mock.patch.object(sync, "get_changed_pages", return_value=[]), \
+                    mock.patch.object(sync, "reindex_section") as reindex:
+                sync.sync_section(
+                    object(),
+                    logging.getLogger("pending-drain"),
+                    temporary,
+                    "Section",
+                    "root",
+                    state,
+                    canonical_store=store,
+                    model_version="model-v1",
+                )
+            self.assertGreater(store.queue_metrics()["pending"], 0)
+            row = store.connection.execute(
+                "SELECT title FROM pages WHERE page_id='pending-page'"
+            ).fetchone()
+            self.assertEqual(row["title"], "Pending Page")
+            self.assertEqual(sync.load_pending_reindex(temporary), {})
+            reindex.assert_not_called()
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

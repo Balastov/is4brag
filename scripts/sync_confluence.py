@@ -536,6 +536,7 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
     if canonical_queue:
         # Once an active canonical store has accepted any work, failure must abort
         # the section so its watermark cannot advance past a partial SQLite write.
+        queued_ids: list[str] = []
         for pid in changed_page_ids:
             page = changed_pages[pid]
             page_chunks = existing.get(pid, [])
@@ -561,14 +562,62 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
                 page_chunks,
                 model_version or SETTINGS.model_version,
             )
+            queued_ids.append(pid)
+        # Drain legacy reindex_pending into SQLite from current JSONL chunks so
+        # nights spent with CANONICAL_STORE=0 do not leave the API index stale.
+        pending_queued = 0
+        for pid in pending_ids:
+            if pid in queued_ids or pid in stale_page_ids:
+                continue
+            page_chunks = existing.get(pid, [])
+            if not page_chunks:
+                continue
+            first = page_chunks[0]
+            canonical_store.replace_page(
+                {
+                    "page_id": pid,
+                    "section": section,
+                    "title": first.get("title", ""),
+                    "url": first.get(
+                        "url",
+                        f"{CONFLUENCE_URL}/spaces/METRO/pages/{pid}",
+                    ),
+                    "breadcrumbs": first.get("breadcrumbs", ""),
+                    "confluence_version": int(
+                        current_state.get("page_versions", {}).get(pid, 0) or 0
+                    ),
+                    "schema_version": first.get(
+                        "schema_version", SETTINGS.schema_version
+                    ),
+                    "source": {"legacy_pending": True},
+                    "source_text": first.get("text", ""),
+                    "parent_text": first.get("text", ""),
+                },
+                page_chunks,
+                model_version or SETTINGS.model_version,
+            )
+            queued_ids.append(pid)
+            pending_queued += 1
         for pid in stale_page_ids:
             canonical_store.tombstone_page(
                 pid, model_version or SETTINGS.model_version
             )
-        if changed_page_ids or stale_page_ids:
+        skipped_pending = [
+            pid for pid in pending_ids
+            if pid not in queued_ids and pid not in stale_page_ids
+        ]
+        if skipped_pending:
+            logger.warning(
+                "  Pending без чанков в JSONL, оставлено в reindex_pending: %d стр."
+                % len(skipped_pending)
+            )
+        if queued_ids or stale_page_ids:
+            clear_processed_pending(
+                base, section, list(dict.fromkeys(queued_ids + sorted(stale_page_ids)))
+            )
             logger.info(
-                f"  SQLite queue: обновлено={len(changed_page_ids)}, "
-                f"удалено={len(stale_page_ids)}"
+                "  SQLite queue: confluence=%d, pending=%d, удалено=%d"
+                % (len(changed_page_ids), pending_queued, len(stale_page_ids))
             )
 
     # 5. Перестраиваем индекс (новые изменения + незавершённые с прошлых запусков)
@@ -578,14 +627,9 @@ def sync_section(session, logger, base: str, section: str, section_id: str,
 
     if canonical_queue:
         # The autonomous worker owns indexing; ingest must never launch a model process.
-        canonical_ids = changed_page_ids + sorted(stale_page_ids)
-        clear_processed_pending(base, section, canonical_ids)
-        if pending_ids and not canonical_ids:
-            logger.warning(
-                "  Legacy pending не импортирован в SQLite; запустите import_legacy.py"
-            )
         logger.info(
-            f"  SQLite queue приняла {len(canonical_ids)} page_id; indexer не запускается"
+            "  SQLite queue приняла %d page_id; indexer не запускается"
+            % len(queued_ids)
         )
         return True
 
