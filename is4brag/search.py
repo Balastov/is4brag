@@ -12,6 +12,17 @@ from .store import FILTER_FIELDS
 
 RRF_K = 60
 
+# Confluence page ids in this corpus are 6–12 digits. Bare numeric queries and
+# explicit ``pageId …`` mentions must not rely on embeddings or FTS.
+_PAGE_ID_BARE = re.compile(r"^\d{6,12}$")
+_PAGE_ID_EXPLICIT = re.compile(r"(?i)\bpageId\s*[:=]?\s*(\d{6,12})\b")
+# Document codes: UTR_01.01.07.01, SND-INT_197_DIP, PR_INT_024_MDM, UBD_01.01-03.
+_IDENTIFIER = re.compile(
+    r"(?<![A-Za-z0-9_])("
+    r"[A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)+"
+    r")(?![A-Za-z0-9_])"
+)
+
 
 def _merge_overlapping(parts: Sequence[str], max_overlap: int = 1000) -> str:
     merged = ""
@@ -75,12 +86,76 @@ def fuse_results(
     return sorted(scores.values(), key=lambda item: item["score"], reverse=True)[:limit]
 
 
+def extract_page_ids(query: str) -> list[str]:
+    """Return page ids that should be resolved by exact lookup, not embeddings."""
+    stripped = query.strip()
+    if _PAGE_ID_BARE.fullmatch(stripped):
+        return [stripped]
+    return list(dict.fromkeys(_PAGE_ID_EXPLICIT.findall(query)))
+
+
+def extract_identifiers(query: str) -> list[str]:
+    """Return document-code tokens worth boosting via title match / phrase FTS."""
+    return list(dict.fromkeys(_IDENTIFIER.findall(query)))
+
+
 def _fts_query(query: str) -> str:
-    # Quoted tokens make punctuation/user operators harmless while retaining OR recall.
-    terms = re.findall(r"\w+", query, flags=re.UNICODE)
-    if not terms:
+    """Build a safe FTS5 MATCH query.
+
+    Short pure-numeric fragments (``01``, ``07``) from dotted codes flood OR
+    recall, so they are dropped. Dotted/underscored identifiers are kept as
+    whole phrases in addition to their meaningful word tokens.
+    """
+    phrases = extract_identifiers(query)
+    terms = [
+        term
+        for term in re.findall(r"\w+", query, flags=re.UNICODE)
+        if not (term.isdigit() and len(term) <= 2)
+    ]
+    parts: list[str] = []
+    seen: set[str] = set()
+    for value in phrases + terms:
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append('"%s"' % value.replace('"', '""'))
+    if not parts:
         return '""'
-    return " OR ".join('"%s"' % term.replace('"', '""') for term in terms)
+    # Identifier-only queries prefer AND so ``UTR_01`` + distinctive parts win
+    # over a noisy OR of shared prefixes across the corpus.
+    stripped = query.strip()
+    if phrases and _IDENTIFIER.fullmatch(stripped):
+        significant = [
+            '"%s"' % term.replace('"', '""')
+            for term in terms
+            if not term.isdigit() and len(term) >= 3
+        ]
+        if len(significant) >= 2:
+            return " OR ".join(
+                [parts[0], "(" + " AND ".join(significant) + ")"]
+            )
+        return parts[0]
+    return " OR ".join(parts)
+
+
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _dedupe_by_page(results: Sequence[Mapping], limit: int) -> list[dict]:
+    seen: set[str] = set()
+    ordered: list[dict] = []
+    for item in results:
+        page_id = str(item.get("page_id", ""))
+        key = page_id or str(item.get("chunk_id", item.get("id", "")))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(dict(item))
+        if len(ordered) >= limit:
+            break
+    return ordered
 
 
 class SearchCore:
@@ -143,6 +218,94 @@ class SearchCore:
                 str(row["section"]): int(row["count"])
                 for row in self.store.connection.execute(sql, params)
             }
+
+    def _passes_filters(
+        self,
+        row: Mapping[str, object],
+        sections: Optional[Sequence[str]],
+        filters: Optional[Mapping[str, str]],
+    ) -> bool:
+        if sections and str(row.get("section", "")) not in set(map(str, sections)):
+            return False
+        for key, value in (filters or {}).items():
+            if str(row.get(key, "")) != value:
+                return False
+        return True
+
+    def _exact_page_matches(
+        self,
+        query: str,
+        sections: Optional[Sequence[str]],
+        filters: Optional[Mapping[str, str]],
+    ) -> list[dict]:
+        page_ids = extract_page_ids(query)
+        if not page_ids:
+            return []
+        found: list[dict] = []
+        with self._db_lock:
+            for page_id in page_ids:
+                row = self.store.connection.execute(
+                    "SELECT c.* FROM chunks c "
+                    "JOIN pages p ON p.page_id = c.page_id "
+                    "WHERE c.page_id = ? AND p.deleted_at IS NULL "
+                    "ORDER BY c.chunk_index, c.duplicate_ordinal LIMIT 1",
+                    (page_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                item = dict(row)
+                if not self._passes_filters(item, sections, filters):
+                    continue
+                item["score"] = 1.0
+                item["match"] = "page_id"
+                found.append(item)
+        return found
+
+    def _title_identifier_matches(
+        self,
+        query: str,
+        sections: Optional[Sequence[str]],
+        filters: Optional[Mapping[str, str]],
+        limit: int,
+    ) -> list[dict]:
+        identifiers = extract_identifiers(query)
+        if not identifiers:
+            return []
+        found: list[dict] = []
+        seen_pages: set[str] = set()
+        with self._db_lock:
+            for identifier in identifiers:
+                pattern = "%" + _like_escape(identifier) + "%"
+                clauses = [
+                    "p.deleted_at IS NULL",
+                    "(c.title LIKE ? ESCAPE '\\' OR p.title LIKE ? ESCAPE '\\')",
+                ]
+                params: list[object] = [pattern, pattern]
+                if sections:
+                    marks = ",".join("?" for _ in sections)
+                    clauses.append("c.section IN (%s)" % marks)
+                    params.extend(str(value) for value in sections)
+                sql = (
+                    "SELECT c.* FROM chunks c "
+                    "JOIN pages p ON p.page_id = c.page_id "
+                    "WHERE %s "
+                    "ORDER BY LENGTH(p.title), c.chunk_index, c.duplicate_ordinal"
+                    % " AND ".join(clauses)
+                )
+                for row in self.store.connection.execute(sql, params):
+                    item = dict(row)
+                    page_id = str(item.get("page_id", ""))
+                    if page_id in seen_pages or not self._passes_filters(
+                        item, None, filters
+                    ):
+                        continue
+                    seen_pages.add(page_id)
+                    item["score"] = 0.99
+                    item["match"] = "title_identifier"
+                    found.append(item)
+                    if len(found) >= limit:
+                        return found
+        return found
 
     def _lexical(
         self,
@@ -273,6 +436,10 @@ class SearchCore:
             if not isinstance(value, str) or not value or len(value) > 500:
                 raise ValueError("filter %s must be a non-empty string" % key)
         candidate_limit = max(self.candidate_limit, top_k * 3)
+        exact_pages = self._exact_page_matches(query, sections, exact_filters)
+        title_hits = self._title_identifier_matches(
+            query, sections, exact_filters, limit=candidate_limit
+        )
         dense = self._dense(query, sections, candidate_limit, exact_filters)
         lexical = self._lexical(query, sections, candidate_limit, exact_filters)
         fused = fuse_results(
@@ -283,7 +450,10 @@ class SearchCore:
             lexical_weight=self.lexical_weight,
             limit=candidate_limit * max(1, len(sections or [None])),
         )
-        results = self._expand(fused, use_parents)[:top_k]
+        # Exact page-id and title-code hits outrank hybrid noise; expand once.
+        priority = self._expand(exact_pages + title_hits, use_parents)
+        hybrid = self._expand(fused, use_parents)
+        results = _dedupe_by_page(priority + hybrid, top_k)
         for result in results:
             result["score"] = round(float(result["score"]), 4)
             result["fusion_score"] = result["score"]

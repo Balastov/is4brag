@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from is4brag.search import SearchCore, fuse_results
+from is4brag.search import (
+    SearchCore,
+    _fts_query,
+    extract_identifiers,
+    extract_page_ids,
+    fuse_results,
+)
 from is4brag.store import CanonicalStore
 
 
@@ -121,6 +127,81 @@ class SearchCoreTests(unittest.TestCase):
         self.core.warm()
         self.assertTrue(all(self.core.status().values()))
         self.assertEqual(self.provider.calls, 1)
+
+    def test_bare_page_id_lookup_outranks_hybrid(self):
+        self.store.replace_page(
+            {
+                "page_id": "12366112",
+                "section": "A",
+                "title": "UF cashflow BP",
+                "schema_version": "2",
+                "parent_text": "planning cash",
+            },
+            [chunk("c-pid", "12366112", "A", "unrelated body about widgets")],
+            "fake",
+        )
+        results = self.core.search("12366112", top_k=3, use_parents=False)
+        self.assertEqual(results[0]["page_id"], "12366112")
+        self.assertEqual(results[0].get("match"), "page_id")
+
+    def test_explicit_page_id_in_mixed_query(self):
+        self.store.replace_page(
+            {
+                "page_id": "88428367",
+                "section": "A",
+                "title": "UPO PKI scenario",
+                "schema_version": "2",
+            },
+            [chunk("c-upo", "88428367", "A", "annual production planning")],
+            "fake",
+        )
+        results = self.core.search(
+            "PKI UPO_01.02-02 pageId 88428367", top_k=3, use_parents=False
+        )
+        self.assertEqual(results[0]["page_id"], "88428367")
+
+    def test_title_identifier_boost_for_document_codes(self):
+        self.store.replace_page(
+            {
+                "page_id": "12366437",
+                "section": "A",
+                "title": "Бизнес-процесс UTR_01.01.07.01 Формирование инвестиционной программы",
+                "schema_version": "2",
+            },
+            [
+                chunk(
+                    "c-utr",
+                    "12366437",
+                    "A",
+                    "Заголовок: Бизнес-процесс UTR_01.01.07.01 Формирование",
+                )
+            ],
+            "fake",
+        )
+        # Dense vectors only know about architecture chunks; code must win via title.
+        results = self.core.search("UTR_01.01.07.01", top_k=3, use_parents=False)
+        self.assertEqual(results[0]["page_id"], "12366437")
+        self.assertEqual(results[0].get("match"), "title_identifier")
+
+
+class QueryParsingTests(unittest.TestCase):
+    def test_extract_page_ids(self):
+        self.assertEqual(extract_page_ids("12366112"), ["12366112"])
+        self.assertEqual(
+            extract_page_ids("PKI pageId 88428367 more"), ["88428367"]
+        )
+        self.assertEqual(extract_page_ids("UTR_01.01.07.01"), [])
+
+    def test_extract_identifiers(self):
+        self.assertEqual(extract_identifiers("UTR_01.01.07.01"), ["UTR_01.01.07.01"])
+        self.assertIn("SND-INT_197_DIP", extract_identifiers("SND-INT_197_DIP Directum"))
+        self.assertEqual(extract_identifiers("обычный текст без кода"), [])
+
+    def test_fts_query_drops_short_numeric_noise(self):
+        query = _fts_query("UTR_01.01.07.01")
+        self.assertIn('"UTR_01.01.07.01"', query)
+        self.assertNotIn('"01"', query)
+        self.assertNotIn('"07"', query)
 
 
 if __name__ == "__main__":
