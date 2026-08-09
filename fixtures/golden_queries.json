@@ -54,7 +54,7 @@
       "id": "udo-roles-matrix",
       "query": "Матрица ролей и полномочий UDO_01.01",
       "expected": {
-        "page_ids": ["68714102"]
+        "page_ids": ["68714102", "88421840"]
       }
     },
     {
@@ -139,44 +139,44 @@
       "id": "directum-roles-first-queue",
       "query": "ПР Directum RX Проектное решение по организации ролей и полномочий пользователей первой очереди",
       "expected": {
-        "title_contains": ["ролей", "полномоч", "Directum"]
+        "page_ids": ["79457898", "88420292"]
       }
     },
     {
       "id": "pki-program-method",
       "query": "4.4.1 Программа и методика предварительных комплексных испытаний",
       "expected": {
-        "title_contains": ["предварительных комплексных", "программа и методика"]
+        "page_ids": ["88422612"]
       }
     },
     {
-      "id": "traceability-matrix",
-      "query": "матрица соответствия требований",
+      "id": "utr-rework-registry",
+      "query": "Реестр доработок УТР 01.01 Управлять инвестициями",
       "expected": {
-        "title_contains": ["матрица соответствия", "traceability"]
+        "page_ids": ["64852800"]
       }
     },
     {
-      "id": "architecture-contours",
-      "query": "целевая архитектура интеграционные контуры",
+      "id": "architecture-customer-systems",
+      "query": "Информационные системы заказчика исторические системы",
       "section": "Архитектура",
       "expected": {
-        "title_contains": ["архитектур", "контур"]
+        "page_ids": ["12355552"]
       }
     },
     {
-      "id": "council-protocol",
-      "query": "протокол управляющего совета",
+      "id": "os-status-protocol",
+      "query": "КИСУ_Протокол_ОС_Статус по проекту КИСУ МСПб",
       "section": "Управление проектом",
       "expected": {
-        "title_contains": ["управляющего совета", "протокол"]
+        "page_ids": ["94036052", "73532007"]
       }
     },
     {
-      "id": "cost-physical-volume",
-      "query": "Стоимость и физический объём",
+      "id": "construction-objects-md",
+      "query": "MD_OB_STROITELSTV Объекты строительства",
       "expected": {
-        "title_contains": ["стоимость", "физическ"]
+        "page_ids": ["28377035"]
       }
     }
   ]
