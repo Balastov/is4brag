@@ -15,6 +15,21 @@ DEFAULT_SECTIONS = {
 }
 
 
+def _load_dotenv(base: Path) -> None:
+    """Load ``<base>/.env`` so every entry point sees the deployed configuration.
+
+    Real environment variables win, which keeps systemd EnvironmentFile and
+    explicit shell exports authoritative over the file.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    env_file = base / ".env"
+    if env_file.is_file():
+        load_dotenv(env_file, override=False)
+
+
 def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     return int(value) if value not in (None, "") else default
@@ -76,6 +91,7 @@ class Settings:
     @classmethod
     def from_env(cls, base_path: Optional[str] = None) -> "Settings":
         base = Path(base_path or os.getenv("KISU_METRO_BASE") or os.getcwd()).expanduser()
+        _load_dotenv(base)
         sandbox = Path(os.getenv("IS4BRAG_SANDBOX_PATH", str(base))).expanduser()
         sqlite_raw = os.getenv("IS4BRAG_SQLITE_PATH", "is4brag.sqlite3")
         sqlite_path = Path(sqlite_raw).expanduser()
