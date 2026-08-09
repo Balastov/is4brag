@@ -22,7 +22,7 @@
     {
       "id": "requirement-status-example",
       "query": "Где описан статус требования?",
-      "section": "KISU Metro - Спецификации требований",
+      "section": "Стадии проекта",
       "expected": {
         "title_contains": ["требован"],
         "answer_contains": ["статус"]
