@@ -109,8 +109,13 @@ def create_app(
         if warm_on_startup:
             try:
                 await asyncio.to_thread(search_core.warm)
-            except Exception:
+            except Exception as exc:
                 # Readiness exposes model failure without killing liveness.
+                import logging
+
+                logging.getLogger("is4brag.api").exception(
+                    "search model warm-up failed: %s", exc
+                )
                 return
 
     @app.on_event("shutdown")
