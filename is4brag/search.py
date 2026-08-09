@@ -16,11 +16,11 @@ RRF_K = 60
 # explicit ``pageId …`` mentions must not rely on embeddings or FTS.
 _PAGE_ID_BARE = re.compile(r"^\d{6,12}$")
 _PAGE_ID_EXPLICIT = re.compile(r"(?i)\bpageId\s*[:=]?\s*(\d{6,12})\b")
-# Document codes: UTR_01.01.07.01, SND-INT_197_DIP, PR_INT_024_MDM, UBD_01.01-03.
+# Document codes: UTR_01.01.07.01, ПР_UDO_01.01.01, SND-INT_197_DIP, UBD_01.01-03.
 _IDENTIFIER = re.compile(
-    r"(?<![A-Za-z0-9_])("
-    r"[A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)+"
-    r")(?![A-Za-z0-9_])"
+    r"(?<![A-Za-zА-Яа-яЁё0-9])("
+    r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*(?:[_.-][A-Za-zА-Яа-яЁё0-9]+)+"
+    r")(?![A-Za-zА-Яа-яЁё0-9])"
 )
 
 
@@ -95,8 +95,33 @@ def extract_page_ids(query: str) -> list[str]:
 
 
 def extract_identifiers(query: str) -> list[str]:
-    """Return document-code tokens worth boosting via title match / phrase FTS."""
-    return list(dict.fromkeys(_IDENTIFIER.findall(query)))
+    """Return document-code tokens worth boosting via title match / phrase FTS.
+
+    Longer codes first so ``ПР_UDO_01.01.01`` outranks a bare ``UDO_01.01``.
+    """
+    found = list(dict.fromkeys(_IDENTIFIER.findall(query)))
+    return sorted(found, key=len, reverse=True)
+
+
+def _query_terms(query: str) -> list[str]:
+    return [
+        term.casefold()
+        for term in re.findall(r"\w+", query, flags=re.UNICODE)
+        if len(term) > 2 and not term.isdigit()
+    ]
+
+
+def _title_match_key(title: str, identifier: str, query: str) -> tuple:
+    """Lower tuple sorts better: word overlap, prefix match, early code, short title."""
+    title_cf = title.casefold()
+    ident_cf = identifier.casefold()
+    terms = [term for term in _query_terms(query) if term != ident_cf]
+    overlap = sum(1 for term in terms if term in title_cf)
+    prefix = 0 if title_cf.startswith(ident_cf) else 1
+    position = title_cf.find(ident_cf)
+    if position < 0:
+        position = 10_000
+    return (-overlap, prefix, position, len(title))
 
 
 def _fts_query(query: str) -> str:
@@ -271,7 +296,7 @@ class SearchCore:
         identifiers = extract_identifiers(query)
         if not identifiers:
             return []
-        found: list[dict] = []
+        candidates: list[tuple[tuple, dict]] = []
         seen_pages: set[str] = set()
         with self._db_lock:
             for identifier in identifiers:
@@ -286,10 +311,10 @@ class SearchCore:
                     clauses.append("c.section IN (%s)" % marks)
                     params.extend(str(value) for value in sections)
                 sql = (
-                    "SELECT c.* FROM chunks c "
+                    "SELECT c.*, p.title AS page_title FROM chunks c "
                     "JOIN pages p ON p.page_id = c.page_id "
                     "WHERE %s "
-                    "ORDER BY LENGTH(p.title), c.chunk_index, c.duplicate_ordinal"
+                    "ORDER BY c.chunk_index, c.duplicate_ordinal"
                     % " AND ".join(clauses)
                 )
                 for row in self.store.connection.execute(sql, params):
@@ -300,11 +325,16 @@ class SearchCore:
                     ):
                         continue
                     seen_pages.add(page_id)
-                    item["score"] = 0.99
+                    page_title = str(item.pop("page_title", "") or item.get("title", ""))
+                    item["title"] = page_title or str(item.get("title", ""))
                     item["match"] = "title_identifier"
-                    found.append(item)
-                    if len(found) >= limit:
-                        return found
+                    key = _title_match_key(item["title"], identifier, query)
+                    candidates.append((key, item))
+        candidates.sort(key=lambda pair: pair[0])
+        found = []
+        for index, (_key, item) in enumerate(candidates[:limit]):
+            item["score"] = round(0.99 - index * 0.001, 4)
+            found.append(item)
         return found
 
     def _lexical(

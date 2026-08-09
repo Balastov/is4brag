@@ -195,7 +195,44 @@ class QueryParsingTests(unittest.TestCase):
     def test_extract_identifiers(self):
         self.assertEqual(extract_identifiers("UTR_01.01.07.01"), ["UTR_01.01.07.01"])
         self.assertIn("SND-INT_197_DIP", extract_identifiers("SND-INT_197_DIP Directum"))
+        self.assertEqual(
+            extract_identifiers("ПР_UDO_01.01.01 Управление договорной"),
+            ["ПР_UDO_01.01.01"],
+        )
         self.assertEqual(extract_identifiers("обычный текст без кода"), [])
+
+    def test_cyrillic_prefix_title_ranks_primary_document(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = CanonicalStore(Path(temporary.name) / "store.sqlite3")
+        self.addCleanup(store.close)
+        store.replace_page(
+            {
+                "page_id": "12365330",
+                "section": "A",
+                "title": "ПР_UDO_01.01.01 Управление договорной документацией",
+                "schema_version": "2",
+            },
+            [chunk("c-pr", "12365330", "A", "contract docs")],
+            "fake",
+        )
+        store.replace_page(
+            {
+                "page_id": "28361577",
+                "section": "A",
+                "title": 'Этап 6_РЗ_ПР_UDO_01.01.01 "Управление договорной документацией"',
+                "schema_version": "2",
+            },
+            [chunk("c-rz", "28361577", "A", "review remarks")],
+            "fake",
+        )
+        core = SearchCore(store, Provider(), Vectors([]))
+        results = core.search(
+            "ПР_UDO_01.01.01 Управление договорной документацией роли",
+            top_k=3,
+            use_parents=False,
+        )
+        self.assertEqual(results[0]["page_id"], "12365330")
 
     def test_fts_query_drops_short_numeric_noise(self):
         query = _fts_query("UTR_01.01.07.01")
