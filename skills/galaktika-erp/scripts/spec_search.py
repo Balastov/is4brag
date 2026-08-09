@@ -5,8 +5,7 @@
 Использование (идентично kisu_metro_search.py):
     python3 spec_search.py "текст запроса" [--top-k 10] [--json] [--verbose]
 
-Спецификации требований теперь интегрированы в основной поисковый пайплайн
-как 5-й раздел «KISU Metro - Спецификации требований».
+Спецификации требований входят в раздел «Стадии проекта» (отдельного раздела нет).
 """
 
 import sys
@@ -17,7 +16,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 METRO_SEARCH = os.path.join(
     SCRIPT_DIR, "..", "..", "kisu-metro", "scripts", "kisu_metro_search.py"
 )
-SPEC_SECTION = "KISU Metro - Спецификации требований"
+# Specs live under the Stages tree in Confluence / canonical store.
+SPEC_SECTION = "Стадии проекта"
 
 if __name__ == "__main__":
     # Запрос должен быть sys.argv[1] для kisu_metro_search.py.
