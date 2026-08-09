@@ -2,30 +2,181 @@
   "schema_version": "2",
   "queries": [
     {
-      "id": "glossary-example",
+      "id": "pageid-12366112",
+      "query": "12366112",
+      "expected": {
+        "page_ids": ["12366112"]
+      }
+    },
+    {
+      "id": "pageid-68714102-roles-matrix",
+      "query": "68714102",
+      "expected": {
+        "page_ids": ["68714102"]
+      }
+    },
+    {
+      "id": "pageid-12365323-udo-entities",
+      "query": "12365323",
+      "expected": {
+        "page_ids": ["12365323"]
+      }
+    },
+    {
+      "id": "pageid-88428367-upo-pki",
+      "query": "PKI UPO_01.02-02 Годовое планирование производства pageId 88428367",
+      "expected": {
+        "page_ids": ["88428367"]
+      }
+    },
+    {
+      "id": "utr-invest-program-code",
+      "query": "UTR_01.01.07.01",
+      "expected": {
+        "page_ids": ["12366437"]
+      }
+    },
+    {
+      "id": "utr-invest-program-title",
+      "query": "UTR_01.01.07.01 Формирование инвестиционной программы по КВ и плана уставного фонда",
+      "expected": {
+        "page_ids": ["12366437"]
+      }
+    },
+    {
+      "id": "udo-contract-docs-pr",
+      "query": "ПР_UDO_01.01.01 Управление договорной документацией роли подразделения функции",
+      "expected": {
+        "page_ids": ["12365330"]
+      }
+    },
+    {
+      "id": "udo-roles-matrix",
+      "query": "Матрица ролей и полномочий UDO_01.01",
+      "expected": {
+        "page_ids": ["68714102"]
+      }
+    },
+    {
+      "id": "udo-procurement-pr",
+      "query": "ПР_UDO_01.01.02 управление закупочной конкурсной документацией подразделения функции роли",
+      "expected": {
+        "page_ids": ["12365321"]
+      }
+    },
+    {
+      "id": "int024-mdm-galaktika",
+      "query": "PR_INT_024_MDM Галактика ERP проектное решение роли полномочия",
+      "expected": {
+        "page_ids": ["35900508"]
+      }
+    },
+    {
+      "id": "int047-galaktika-directum",
+      "query": "PR_INT_047 Галактика ERP Directum RX интеграция роли полномочия пользователи",
+      "expected": {
+        "page_ids": ["84942566"]
+      }
+    },
+    {
+      "id": "ubd-pki-training",
+      "query": "UBD_01.01-03 Сценарий ПКИ",
+      "expected": {
+        "page_ids": ["88426311"]
+      }
+    },
+    {
+      "id": "ubd-pai-training",
+      "query": "UBD_01.01-03 Сценарий ПАИ. Учет обучений аттестаций DIRECTUM",
+      "expected": {
+        "page_ids": ["68707843"]
+      }
+    },
+    {
+      "id": "upo-pki-planning",
+      "query": "UPO_01.02-02 Сценарий ПКИ",
+      "expected": {
+        "page_ids": ["88428367"]
+      }
+    },
+    {
+      "id": "snd-int-197",
+      "query": "SND-INT_197_DIP Directum RX Этап 4",
+      "expected": {
+        "page_ids": ["48771903"]
+      }
+    },
+    {
+      "id": "snd-int-201",
+      "query": "SND-INT_201_DIP акт-предписание Галактика EAM DirectumRX",
+      "expected": {
+        "page_ids": ["48771915"]
+      }
+    },
+    {
+      "id": "uf-rbp-pr",
+      "query": "ПР_UF_01.01.10 Учет расходов будущих периодов",
+      "expected": {
+        "page_ids": ["12366224"]
+      }
+    },
+    {
+      "id": "uf-cashflow-bp",
+      "query": "Бизнес-процесс UF_01.02.01 Планирование поступлений и расходований денежных средств",
+      "expected": {
+        "page_ids": ["12366112"]
+      }
+    },
+    {
+      "id": "glossary-terms",
       "query": "Что означает сокращение КИСУ?",
       "section": "Термины и сокращения",
       "expected": {
-        "title_contains": ["Термины"],
-        "answer_contains": ["КИСУ"]
+        "page_ids": ["1933357"]
       }
     },
     {
-      "id": "architecture-integration-example",
-      "query": "Какие интеграции описаны в целевой архитектуре?",
+      "id": "directum-roles-first-queue",
+      "query": "ПР Directum RX Проектное решение по организации ролей и полномочий пользователей первой очереди",
+      "expected": {
+        "title_contains": ["ролей", "полномоч", "Directum"]
+      }
+    },
+    {
+      "id": "pki-program-method",
+      "query": "4.4.1 Программа и методика предварительных комплексных испытаний",
+      "expected": {
+        "title_contains": ["предварительных комплексных", "программа и методика"]
+      }
+    },
+    {
+      "id": "traceability-matrix",
+      "query": "матрица соответствия требований",
+      "expected": {
+        "title_contains": ["матрица соответствия", "traceability"]
+      }
+    },
+    {
+      "id": "architecture-contours",
+      "query": "целевая архитектура интеграционные контуры",
       "section": "Архитектура",
       "expected": {
-        "title_contains": ["архитектур"],
-        "answer_contains": ["интеграц"]
+        "title_contains": ["архитектур", "контур"]
       }
     },
     {
-      "id": "requirement-status-example",
-      "query": "Где описан статус требования?",
-      "section": "Стадии проекта",
+      "id": "council-protocol",
+      "query": "протокол управляющего совета",
+      "section": "Управление проектом",
       "expected": {
-        "title_contains": ["требован"],
-        "answer_contains": ["статус"]
+        "title_contains": ["управляющего совета", "протокол"]
+      }
+    },
+    {
+      "id": "cost-physical-volume",
+      "query": "Стоимость и физический объём",
+      "expected": {
+        "title_contains": ["стоимость", "физическ"]
       }
     }
   ]
