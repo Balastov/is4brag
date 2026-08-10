@@ -16,6 +16,16 @@ from .search import SearchCore
 from .store import CanonicalStore, FILTER_FIELDS
 from .worker import build_provider
 
+# FastAPI resolves string annotations for nested route handlers against this
+# module globals. Keep Request/Header here (not only inside create_app), or
+# POST /webhooks/confluence becomes a bogus required query param "request".
+try:
+    from fastapi import FastAPI, Header, Request
+except ImportError:  # optional extra is4brag[api]
+    FastAPI = None  # type: ignore[misc, assignment]
+    Header = None  # type: ignore[misc, assignment]
+    Request = None  # type: ignore[misc, assignment]
+
 
 class SearchMetrics:
     def __init__(self) -> None:
@@ -78,8 +88,9 @@ def create_app(
     warm_on_startup: bool = True,
 ):
     """Create an app; importing this module does not require FastAPI."""
+    if FastAPI is None or Request is None or Header is None:
+        raise RuntimeError("FastAPI is optional; install is4brag[api]")
     try:
-        from fastapi import FastAPI, Header, Request
         from fastapi.responses import JSONResponse, PlainTextResponse
     except ImportError as exc:
         raise RuntimeError("FastAPI is optional; install is4brag[api]") from exc

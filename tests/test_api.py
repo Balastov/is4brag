@@ -50,6 +50,7 @@ class ApiTests(unittest.TestCase):
             search_admin_token="secret",
             search_timeout=0.2,
             search_concurrency=1,
+            webhook_secret="webhook-secret",
         )
         app = create_app(settings, core=self.core)
         try:
@@ -75,6 +76,38 @@ class ApiTests(unittest.TestCase):
             ).status_code,
             200,
         )
+
+    def test_confluence_webhook_does_not_require_query_request_param(self):
+        import hashlib
+        import hmac
+        import json
+
+        body = json.dumps(
+            {
+                "timestamp": "2026-08-10T12:00:00.000Z",
+                "event": "page_updated",
+                "page": {"id": "1933363"},
+            }
+        ).encode("utf-8")
+        missing = self.client.post(
+            "/webhooks/confluence",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(missing.status_code, 401)
+        self.assertNotIn("Field required", missing.text)
+        signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+        accepted = self.client.post(
+            "/webhooks/confluence",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": "sha256=" + signature,
+                "X-Atlassian-Webhook-Delivery": "test-delivery-api",
+            },
+        )
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(accepted.json()["status"], "accepted")
 
 
 if __name__ == "__main__":
