@@ -47,15 +47,41 @@ def _task_title(task: dict[str, Any]) -> str:
     return str(task.get("title") or task.get("TITLE") or "").strip()
 
 
+def _task_id_num(task: dict[str, Any]) -> int:
+    raw = task.get("id") or task.get("ID") or 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _unwrap_tasks(result: Any) -> list[dict[str, Any]]:
+    """Extract task objects from tasks.task.list payload.
+
+    Important: empty list `[]` must stay empty — do not fall through to the
+    wrapper dict (that produced a fake item with id='tasks').
+    """
+    if result is None:
+        return []
     tasks: Any = result
     if isinstance(result, dict):
-        tasks = result.get("tasks") or result.get("list") or result.get("items") or result
+        if "tasks" in result:
+            tasks = result["tasks"]
+        elif "list" in result:
+            tasks = result["list"]
+        elif "items" in result:
+            tasks = result["items"]
     normalized = []
     for item in as_list(tasks):
-        task = item.get("task") if isinstance(item, dict) and "task" in item else item
-        if isinstance(task, dict):
-            normalized.append(task)
+        if not isinstance(item, dict):
+            continue
+        task = item.get("task") if "task" in item and isinstance(item.get("task"), dict) else item
+        # Skip as_list artifacts like {"id": "tasks", "value": ...}
+        if "value" in task and not (_task_title(task) or _task_id_num(task)):
+            continue
+        if not (_task_title(task) or task.get("id") or task.get("ID")):
+            continue
+        normalized.append(task)
     return normalized
 
 
@@ -69,15 +95,19 @@ def find_tasks(title: str, limit: int = 20) -> tuple[list[dict[str, Any]], list[
     ]
     for label, filt in filters:
         tried.append(label)
-        result = call(
-            "tasks.task.list",
-            {
-                "filter": filt,
-                "select": TASK_SELECT,
-                "order": {"ID": "desc"},
-                "start": 0,
-            },
-        )
+        try:
+            result = call(
+                "tasks.task.list",
+                {
+                    "filter": filt,
+                    "select": TASK_SELECT,
+                    "order": {"ID": "desc"},
+                    "start": 0,
+                },
+            )
+        except BitrixError as exc:
+            tried.append(f"{label} ERROR: {exc}")
+            continue
         found = _unwrap_tasks(result)
         if found:
             scored = []
@@ -90,7 +120,7 @@ def find_tasks(title: str, limit: int = 20) -> tuple[list[dict[str, Any]], list[
                     scored.append((1, task))
                 else:
                     scored.append((2, task))
-            scored.sort(key=lambda x: (x[0], -int(str((x[1].get("id") or x[1].get("ID") or 0)))))
+            scored.sort(key=lambda x: (x[0], -_task_id_num(x[1])))
             return [t for _, t in scored][:limit], tried
     return [], tried
 

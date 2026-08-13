@@ -68,18 +68,21 @@ def chat_title(chat: dict[str, Any]) -> str:
     ).strip()
 
 
-def _from_search(query: str, limit: int) -> list[dict[str, Any]]:
-    result = call("im.search.chat.list", {"FIND": query, "OFFSET": 0, "LIMIT": min(limit, 50)})
+def _from_search(query: str, limit: int) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        result = call("im.search.chat.list", {"FIND": query, "OFFSET": 0, "LIMIT": min(limit, 50)})
+    except BitrixError as exc:
+        return [], str(exc)
     chats = []
     for item in as_list(result):
         if isinstance(item, dict):
             item = dict(item)
             item.setdefault("source", "im.search.chat.list")
             chats.append(item)
-    return chats
+    return chats, None
 
 
-def _from_groups(query: str) -> list[dict[str, Any]]:
+def _from_groups(query: str) -> tuple[list[dict[str, Any]], str | None]:
     chats: list[dict[str, Any]] = []
     try:
         result = call(
@@ -90,8 +93,8 @@ def _from_groups(query: str) -> list[dict[str, Any]]:
                 "IS_ADMIN": "Y",
             },
         )
-    except BitrixError:
-        return chats
+    except BitrixError as exc:
+        return [], str(exc)
     for group in as_list(result):
         gid = group.get("ID") or group.get("id")
         name = group.get("NAME") or group.get("name")
@@ -108,10 +111,10 @@ def _from_groups(query: str) -> list[dict[str, Any]]:
                 "source": "sonet_group.get",
             }
         )
-    return chats
+    return chats, None
 
 
-def _from_workgroups(query: str) -> list[dict[str, Any]]:
+def _from_workgroups(query: str) -> tuple[list[dict[str, Any]], str | None]:
     chats: list[dict[str, Any]] = []
     try:
         result = call(
@@ -123,8 +126,8 @@ def _from_workgroups(query: str) -> list[dict[str, Any]]:
                 "params": {"IS_ADMIN": "Y"},
             },
         )
-    except BitrixError:
-        return chats
+    except BitrixError as exc:
+        return [], str(exc)
     items = result
     if isinstance(result, dict):
         items = result.get("workgroups") or result.get("items") or result.get("list") or result
@@ -144,10 +147,10 @@ def _from_workgroups(query: str) -> list[dict[str, Any]]:
                 "source": "socialnetwork.api.workgroup.list",
             }
         )
-    return chats
+    return chats, None
 
 
-def _from_recent(query: str, pages: int = 4) -> list[dict[str, Any]]:
+def _from_recent(query: str, pages: int = 4) -> tuple[list[dict[str, Any]], str | None]:
     chats: list[dict[str, Any]] = []
     last_date = None
     try:
@@ -178,16 +181,23 @@ def _from_recent(query: str, pages: int = 4) -> list[dict[str, Any]]:
                 item["title"] = title
                 item["source"] = "im.recent.list"
                 chats.append(item)
-            dates = [it.get("date_last_activity") or it.get("message", {}).get("date") if isinstance(it.get("message"), dict) else it.get("date") for it in batch]
-            dates = [d for d in dates if d]
+            dates = []
+            for it in batch:
+                msg = it.get("message")
+                if isinstance(msg, dict) and msg.get("date"):
+                    dates.append(msg.get("date"))
+                elif it.get("date_last_activity"):
+                    dates.append(it.get("date_last_activity"))
+                elif it.get("date"):
+                    dates.append(it.get("date"))
             if not dates:
                 break
             last_date = min(str(d) for d in dates)
             if len(batch) < 50:
                 break
-    except BitrixError:
-        return chats
-    return chats
+    except BitrixError as exc:
+        return chats, str(exc)
+    return chats, None
 
 
 def find_chats(query: str, limit: int = 10) -> tuple[list[dict[str, Any]], list[str]]:
@@ -195,8 +205,11 @@ def find_chats(query: str, limit: int = 10) -> tuple[list[dict[str, Any]], list[
     found: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def add(items: list[dict[str, Any]], source: str) -> None:
-        tried.append(source)
+    def add(items: list[dict[str, Any]], source: str, err: str | None) -> None:
+        if err:
+            tried.append(f"{source} ERROR: {err}")
+        else:
+            tried.append(f"{source} ({len(items)})")
         for item in items:
             try:
                 did = dialog_id_for_chat(item)
@@ -210,13 +223,17 @@ def find_chats(query: str, limit: int = 10) -> tuple[list[dict[str, Any]], list[
             seen.add(did)
             found.append(item)
 
-    add(_from_search(query, limit), "im.search.chat.list")
+    items, err = _from_search(query, limit)
+    add(items, "im.search.chat.list", err)
     if not found:
-        add(_from_groups(query), "sonet_group.get")
+        items, err = _from_groups(query)
+        add(items, "sonet_group.get", err)
     if not found:
-        add(_from_workgroups(query), "socialnetwork.api.workgroup.list")
+        items, err = _from_workgroups(query)
+        add(items, "socialnetwork.api.workgroup.list", err)
     if not found:
-        add(_from_recent(query), "im.recent.list")
+        items, err = _from_recent(query)
+        add(items, "im.recent.list", err)
     return found[:limit], tried
 
 
