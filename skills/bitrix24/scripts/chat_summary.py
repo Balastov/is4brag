@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from datetime import datetime
 from typing import Any
@@ -30,9 +31,22 @@ from bitrix_client import (  # noqa: E402
     resolve_users,
 )
 
+# Drop emoji / symbols so "УДО 01🙆☀📑" matches query "УДО 01"
+_NOISE_RE = re.compile(
+    r"["
+    r"\U0001F300-\U0001FAFF"
+    r"\U00002700-\U000027BF"
+    r"\U00002600-\U000026FF"
+    r"\U0001F1E0-\U0001F1FF"
+    r"]+",
+    flags=re.UNICODE,
+)
+
 
 def _norm(text: Any) -> str:
-    return " ".join(str(text or "").casefold().split())
+    cleaned = _NOISE_RE.sub(" ", str(text or ""))
+    cleaned = re.sub(r"[^\w\s\-./]+", " ", cleaned, flags=re.UNICODE)
+    return " ".join(cleaned.casefold().split())
 
 
 def _contains(haystack: Any, needle: str) -> bool:
