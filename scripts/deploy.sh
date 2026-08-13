@@ -71,7 +71,14 @@ sync_skill_dir() {
         use_sudo=1
     fi
 
-    local rsync_flags=(-a --delete --exclude '__pycache__' --exclude '*.pyc')
+    # --delete не трогает чужие __pycache__ на dest (часто root из контейнера)
+    local rsync_flags=(
+        -a --delete
+        --exclude '__pycache__'
+        --exclude '*.pyc'
+        --filter 'P __pycache__/'
+        --filter 'P *.pyc'
+    )
     if command -v rsync >/dev/null 2>&1; then
         if [[ "$use_sudo" -eq 1 ]]; then
             log "  (sudo) $dest — файлы root/недоступны на запись"
@@ -80,17 +87,22 @@ sync_skill_dir() {
             sudo chown -R "$(id -u):$(id -g)" "$dest" 2>/dev/null || true
         else
             mkdir -p "$dest"
-            rsync "${rsync_flags[@]}" "$src/" "$dest/"
+            if ! rsync "${rsync_flags[@]}" "$src/" "$dest/"; then
+                log "  rsync без sudo не вышло, повтор с sudo"
+                sudo mkdir -p "$dest"
+                sudo rsync "${rsync_flags[@]}" "$src/" "$dest/"
+                sudo chown -R "$(id -u):$(id -g)" "$dest" 2>/dev/null || true
+            fi
         fi
     else
         if [[ "$use_sudo" -eq 1 ]]; then
-            sudo rm -rf "$dest"
             sudo mkdir -p "$dest"
+            sudo find "$dest" -mindepth 1 ! -path '*__pycache__*' ! -name '*.pyc' -exec rm -rf {} + 2>/dev/null || true
             sudo cp -a "$src/." "$dest/"
             sudo chown -R "$(id -u):$(id -g)" "$dest" 2>/dev/null || true
         else
-            rm -rf "$dest"
             mkdir -p "$dest"
+            find "$dest" -mindepth 1 ! -path '*__pycache__*' ! -name '*.pyc' -exec rm -rf {} + 2>/dev/null || true
             cp -a "$src/." "$dest/"
         fi
     fi
@@ -256,8 +268,11 @@ else
         src="$REPO_ROOT/skills/$skill"
         [[ -d "$src" ]] || continue
         dest="$SKILLS_DEST/$skill"
-        sync_skill_dir "$src" "$dest"
-        log "→ SKILL: $skill"
+        if sync_skill_dir "$src" "$dest"; then
+            log "→ SKILL: $skill"
+        else
+            log "WARN: SKILL $skill не выложен (права/rsync). Остальные skills продолжаем."
+        fi
     done
 fi
 

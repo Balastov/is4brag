@@ -48,14 +48,22 @@ def webhook_base() -> str:
 
 def call(method: str, params: dict[str, Any] | None = None) -> Any:
     """Call Bitrix24 REST method. Returns `result` field."""
+    return call_full(method, params).get("result")
+
+
+def call_full(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Call Bitrix24 REST method. Returns the full JSON payload."""
     base = webhook_base()
-    url = urllib.parse.urljoin(base, method + ".json")
-    body = urllib.parse.urlencode(_flatten(params or {}), doseq=True).encode("utf-8")
+    url = urllib.parse.urljoin(base, method)
+    body = json.dumps(params or {}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
         method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
     )
     ctx = ssl.create_default_context()
     try:
@@ -67,43 +75,36 @@ def call(method: str, params: dict[str, Any] | None = None) -> Any:
     except urllib.error.URLError as exc:
         raise BitrixError(f"Network error on {method}: {exc}") from exc
 
-    if "error" in payload:
+    if not isinstance(payload, dict):
+        raise BitrixError(f"Unexpected payload from {method}: {payload!r}")
+    if payload.get("error"):
         raise BitrixError(
             f"{payload.get('error')}: {payload.get('error_description') or payload}"
         )
-    return payload.get("result")
+    return payload
 
 
-def _flatten(params: dict[str, Any], prefix: str = "") -> list[tuple[str, str]]:
-    """Flatten nested dict/list into Bitrix form encoding."""
-    items: list[tuple[str, str]] = []
-    for key, value in params.items():
-        full = f"{prefix}[{key}]" if prefix else str(key)
-        if isinstance(value, dict):
-            items.extend(_flatten(value, full))
-        elif isinstance(value, list):
-            for i, item in enumerate(value):
-                if isinstance(item, dict):
-                    items.extend(_flatten(item, f"{full}[{i}]"))
-                else:
-                    items.append((f"{full}[{i}]", _scalar(item)))
-        elif value is None:
-            continue
-        else:
-            items.append((full, _scalar(value)))
-    return items
-
-
-def _scalar(value: Any) -> str:
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    return str(value)
+def as_list(value: Any) -> list[Any]:
+    """Normalize Bitrix list-or-dict-keyed-by-id payloads."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        items = []
+        for key, item in value.items():
+            if isinstance(item, dict):
+                items.append(item)
+            elif item is not None:
+                items.append({"id": key, "value": item})
+        return items
+    return []
 
 
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
-    text = value.strip()
+    text = str(value).strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
@@ -134,18 +135,17 @@ def resolve_users(user_ids: list[str | int]) -> dict[str, str]:
         return {}
     result = call("user.get", {"FILTER": {"ID": ids}})
     names: dict[str, str] = {}
-    if not isinstance(result, list):
-        return names
-    for user in result:
-        uid = str(user.get("ID") or "")
+    for user in as_list(result):
+        uid = str(user.get("ID") or user.get("id") or "")
         parts = [
-            user.get("NAME") or "",
-            user.get("LAST_NAME") or "",
+            user.get("NAME") or user.get("name") or "",
+            user.get("LAST_NAME") or user.get("lastName") or "",
         ]
         name = " ".join(p for p in parts if p).strip()
         if not name:
             name = user.get("EMAIL") or user.get("LOGIN") or uid
-        names[uid] = name
+        if uid:
+            names[uid] = name
     return names
 
 

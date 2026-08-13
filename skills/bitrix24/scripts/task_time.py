@@ -19,6 +19,7 @@ if _SCRIPTS not in sys.path:
 
 from bitrix_client import (  # noqa: E402
     BitrixError,
+    as_list,
     call,
     emit_error,
     emit_json,
@@ -26,42 +27,72 @@ from bitrix_client import (  # noqa: E402
     resolve_users,
 )
 
+TASK_SELECT = [
+    "ID",
+    "TITLE",
+    "STATUS",
+    "GROUP_ID",
+    "RESPONSIBLE_ID",
+    "CREATED_BY",
+    "TIME_SPENT_IN_LOGS",
+    "DURATION_FACT",
+]
 
-def find_tasks(title: str, limit: int = 20) -> list[dict[str, Any]]:
-    # Prefer substring match via %query%
-    needle = title.strip()
-    result = call(
-        "tasks.task.list",
-        {
-            "filter": {"%TITLE": needle},
-            "select": [
-                "ID",
-                "TITLE",
-                "STATUS",
-                "GROUP_ID",
-                "RESPONSIBLE_ID",
-                "CREATED_BY",
-                "TIME_SPENT_IN_LOGS",
-                "DURATION_FACT",
-            ],
-            "order": {"ID": "DESC"},
-            "start": 0,
-        },
-    )
-    tasks: list[dict[str, Any]] = []
+
+def _norm(text: Any) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
+def _task_title(task: dict[str, Any]) -> str:
+    return str(task.get("title") or task.get("TITLE") or "").strip()
+
+
+def _unwrap_tasks(result: Any) -> list[dict[str, Any]]:
+    tasks: Any = result
     if isinstance(result, dict):
-        tasks = result.get("tasks") or result.get("list") or []
-    elif isinstance(result, list):
-        tasks = result
-
-    # Normalize: Bitrix often nests under "task" or returns flat fields
+        tasks = result.get("tasks") or result.get("list") or result.get("items") or result
     normalized = []
-    for item in tasks:
+    for item in as_list(tasks):
         task = item.get("task") if isinstance(item, dict) and "task" in item else item
         if isinstance(task, dict):
             normalized.append(task)
-    # API may ignore start/limit; trim client-side
-    return normalized[:limit]
+    return normalized
+
+
+def find_tasks(title: str, limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
+    needle = title.strip()
+    tried: list[str] = []
+    filters = [
+        ("TITLE %pattern%", {"TITLE": f"%{needle}%"}),
+        ("%TITLE like", {"%TITLE": needle}),
+        ("TITLE exact", {"TITLE": needle}),
+    ]
+    for label, filt in filters:
+        tried.append(label)
+        result = call(
+            "tasks.task.list",
+            {
+                "filter": filt,
+                "select": TASK_SELECT,
+                "order": {"ID": "desc"},
+                "start": 0,
+            },
+        )
+        found = _unwrap_tasks(result)
+        if found:
+            scored = []
+            q = _norm(needle)
+            for task in found:
+                t = _norm(_task_title(task))
+                if t == q:
+                    scored.append((0, task))
+                elif q in t:
+                    scored.append((1, task))
+                else:
+                    scored.append((2, task))
+            scored.sort(key=lambda x: (x[0], -int(str((x[1].get("id") or x[1].get("ID") or 0)))))
+            return [t for _, t in scored][:limit], tried
+    return [], tried
 
 
 def get_task(task_id: str | int) -> dict[str, Any]:
@@ -69,16 +100,7 @@ def get_task(task_id: str | int) -> dict[str, Any]:
         "tasks.task.get",
         {
             "taskId": int(task_id),
-            "select": [
-                "ID",
-                "TITLE",
-                "STATUS",
-                "GROUP_ID",
-                "RESPONSIBLE_ID",
-                "CREATED_BY",
-                "TIME_SPENT_IN_LOGS",
-                "DURATION_FACT",
-            ],
+            "select": TASK_SELECT,
         },
     )
     if isinstance(result, dict):
@@ -89,7 +111,6 @@ def get_task(task_id: str | int) -> dict[str, Any]:
 
 
 def elapsed_list(task_id: str | int) -> list[dict[str, Any]]:
-    # Legacy method signature: ORDER, FILTER, PARAMS, TASKID positionally-ish via form
     result = call(
         "task.elapseditem.getlist",
         {
@@ -97,24 +118,27 @@ def elapsed_list(task_id: str | int) -> list[dict[str, Any]]:
             "ORDER": {"ID": "ASC"},
         },
     )
-    if isinstance(result, list):
-        return result
     if isinstance(result, dict):
         for key in ("items", "elapsedItems", "list"):
-            if isinstance(result.get(key), list):
-                return result[key]
-    return []
+            if result.get(key) is not None:
+                return as_list(result.get(key))
+    return as_list(result)
 
 
 def pick_task(tasks: list[dict[str, Any]], title: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     if not tasks:
         return None, []
-    q = title.strip().casefold()
-    exact = [t for t in tasks if str(t.get("title") or t.get("TITLE") or "").casefold() == q]
+    q = _norm(title)
+    exact = [t for t in tasks if _norm(_task_title(t)) == q]
     if len(exact) == 1:
         return exact[0], []
     if len(exact) > 1:
         return None, exact
+    contains = [t for t in tasks if q in _norm(_task_title(t))]
+    if len(contains) == 1:
+        return contains[0], []
+    if len(contains) > 1:
+        return None, contains
     if len(tasks) == 1:
         return tasks[0], []
     return None, tasks
@@ -123,7 +147,7 @@ def pick_task(tasks: list[dict[str, Any]], title: str) -> tuple[dict[str, Any] |
 def task_brief(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": task.get("id") or task.get("ID"),
-        "title": task.get("title") or task.get("TITLE"),
+        "title": _task_title(task) or None,
         "status": task.get("status") or task.get("STATUS"),
         "group_id": task.get("groupId") or task.get("GROUP_ID"),
         "responsible_id": task.get("responsibleId") or task.get("RESPONSIBLE_ID"),
@@ -141,11 +165,12 @@ def main() -> None:
         emit_error("Provide task title or --task-id")
 
     try:
+        tried: list[str] = []
         if args.task_id:
             task = get_task(args.task_id)
             candidates: list[dict[str, Any]] = []
         else:
-            found = find_tasks(args.title or "")
+            found, tried = find_tasks(args.title or "")
             task, candidates = pick_task(found, args.title or "")
             if task is None:
                 emit_json(
@@ -153,6 +178,11 @@ def main() -> None:
                         "ok": False,
                         "error": "ambiguous_or_missing_task",
                         "query": args.title,
+                        "tried": tried,
+                        "hint": (
+                            "Webhook user must have task scope and access to the task. "
+                            "Retry with --task-id if the title is not unique."
+                        ),
                         "candidates": [task_brief(t) for t in candidates],
                     },
                     exit_code=2,
@@ -204,7 +234,6 @@ def main() -> None:
             by_user_list.append(bucket)
         by_user_list.sort(key=lambda x: x["seconds"], reverse=True)
 
-        # Fallback field from task itself if logs empty but fact filled
         fact = task.get("timeSpentInLogs") or task.get("TIME_SPENT_IN_LOGS")
         try:
             fact_seconds = int(fact) if fact not in (None, "") else None
@@ -215,6 +244,7 @@ def main() -> None:
             {
                 "ok": True,
                 "query": args.title,
+                "tried": tried,
                 "task": {
                     **brief,
                     "responsible": names.get(str(responsible), responsible) if responsible else None,
