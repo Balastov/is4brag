@@ -40,15 +40,21 @@ BITRIX24_WEBHOOK_CODE=<code>
 | Право | Зачем |
 |---|---|
 | **Чат и Уведомления (im)** | поиск чатов, чтение сообщений |
-| **Задачи (task)** | поиск задач, списания времени |
-| **Пользователи (user)** | ФИО авторов / исполнителей |
-| **Соцсеть / Группы (sonet / socialnetwork)** | проектные чаты вида `sg…` («УД 01») |
+| **Задачи (task / tasks)** | поиск задач, списания времени |
+| **Пользователи (user / user_brief)** | ФИО авторов / исполнителей |
+| **Соцсеть / Рабочие группы (sonet / socialnetwork)** | **обязательно** для проектных чатов `sg…` («УД 01») |
+
+Без `sonet`/`socialnetwork` webhook вернёт `insufficient_scope` на `sonet_group.get`,
+и чаты проектов по названию не находятся (обычный `im.search` их не видит).
+
+После смены прав **пересоздай входящий webhook** (старый URL не подхватывает новые scope)
+и обнови `BITRIX24_WEBHOOK_URL`.
 
 Бот/пользователь webhook должен состоять в нужных чатах/группах
 (иначе поиск вернёт `ambiguous_or_missing_*` с пустыми `candidates`).
 
-Поиск чата идёт несколькими методами: `im.search.chat.list` → `sonet_group.get`
-→ `socialnetwork.api.workgroup.list` → `im.recent.list`. В ответе поле `tried`.
+Поиск чата: `im.search.chat.list` → `sonet_group.get` → `socialnetwork.api.workgroup.list`
+→ `im.recent.list`. В ответе поле `tried` (счётчики / ERROR).
 
 ## Скрипты
 

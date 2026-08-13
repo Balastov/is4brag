@@ -88,11 +88,19 @@ def _unwrap_tasks(result: Any) -> list[dict[str, Any]]:
 def find_tasks(title: str, limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
     needle = title.strip()
     tried: list[str] = []
-    filters = [
-        ("TITLE %pattern%", {"TITLE": f"%{needle}%"}),
+    # On this portal "%TITLE"/substring works; "TITLE":"%…%" often returns empty.
+    filters: list[tuple[str, dict[str, Any]]] = [
         ("%TITLE like", {"%TITLE": needle}),
+        ("TITLE %pattern%", {"TITLE": f"%{needle}%"}),
         ("TITLE exact", {"TITLE": needle}),
     ]
+    # Fallback: shorter distinctive substring (drop very short tokens)
+    tokens = [t for t in needle.split() if len(t) >= 4]
+    if len(tokens) >= 2:
+        short = " ".join(tokens[:4])
+        if short.casefold() != needle.casefold():
+            filters.append((f"%TITLE tokens {short!r}", {"%TITLE": short}))
+
     for label, filt in filters:
         tried.append(label)
         try:
@@ -116,7 +124,7 @@ def find_tasks(title: str, limit: int = 20) -> tuple[list[dict[str, Any]], list[
                 t = _norm(_task_title(task))
                 if t == q:
                     scored.append((0, task))
-                elif q in t:
+                elif q in t or t in q:
                     scored.append((1, task))
                 else:
                     scored.append((2, task))
