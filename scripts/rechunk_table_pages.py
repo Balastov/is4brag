@@ -149,15 +149,25 @@ def main(argv=None) -> int:
         labeled = sum(
             1
             for chunk in chunks
-            if chunk.get("content_type") == "table" and ": " in chunk.get("text", "")
+            if "| строка " in chunk.get("text", "")
+            and ": " in chunk.get("text", "")
+        )
+        tableish = sum(
+            1
+            for chunk in chunks
+            if chunk.get("content_type") == "table"
+            or chunk.get("structural_content_type") == "table"
+            or "[Таблица " in chunk.get("text", "")
         )
         print(
             "chunks_written",
             len(chunks),
             "chunker",
             sorted({chunk["chunker_version"] for chunk in chunks}),
-            "table_chunks_with_col_labels",
+            "chunks_with_col_labels",
             labeled,
+            "tableish_chunks",
+            tableish,
             flush=True,
         )
 
