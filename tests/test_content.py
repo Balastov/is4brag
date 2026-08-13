@@ -22,7 +22,10 @@ class ContentTests(unittest.TestCase):
         document = normalize_html(raw)
         self.assertIn("[Таблица 1]", document.text)
         self.assertIn("| заголовок | Код | Описание |", document.text)
-        self.assertIn("| строка 2 | REQ-42 | Быстрый ответ |", document.text)
+        self.assertIn(
+            "| строка 1 | Код: REQ-42 | Описание: Быстрый ответ |",
+            document.text,
+        )
         self.assertEqual(
             document.requirements,
             [{"data-requirement-id": "REQ-42", "data-status": "approved"}],
@@ -39,7 +42,7 @@ class ContentTests(unittest.TestCase):
             [chunk["chunk_id"] for chunk in second],
         )
         self.assertTrue(all(chunk["content_hash"] for chunk in first))
-        self.assertTrue(all(chunk["chunker_version"] == "3" for chunk in first))
+        self.assertTrue(all(chunk["chunker_version"] == "4" for chunk in first))
         self.assertTrue(all(chunk["schema_version"] == "2" for chunk in first))
 
     def test_duplicate_chunks_get_distinct_deterministic_ordinals(self):
@@ -90,6 +93,10 @@ class ContentTests(unittest.TestCase):
                 for item in chunks
             )
         )
+        self.assertTrue(
+            any("ID: 1" in item["text"] and "Text: First complete row" in item["text"]
+                for item in chunks)
+        )
         requirement = next(item for item in chunks if item["content_type"] == "requirement")
         self.assertEqual(requirement["parent_references"], ["REQ-1"])
         self.assertEqual(requirement["child_references"], ["REQ-8"])
@@ -98,3 +105,22 @@ class ContentTests(unittest.TestCase):
             [item["chunk_id"] for item in chunks],
             [item["chunk_id"] for item in legacy],
         )
+
+    def test_thead_colspan_and_nested_table(self):
+        body = """
+        <table>
+          <thead><tr><th>A</th><th colspan="2">B</th></tr></thead>
+          <tbody><tr><td>1</td><td>2</td><td>3</td></tr></tbody>
+        </table>
+        <table>
+          <tr><th>Outer</th></tr>
+          <tr><td>wrap<table><tr><th>Inner</th></tr>
+          <tr><td>nested</td></tr></table></td></tr>
+        </table>
+        """
+        document = normalize_html(body)
+        self.assertIn("| заголовок | A | B | B |", document.text)
+        self.assertIn("| строка 1 | A: 1 | B: 2 | B: 3 |", document.text)
+        self.assertIn("[Таблица 1]", document.text)
+        self.assertIn("[Таблица 2]", document.text)
+        self.assertIn("Inner: nested", document.text)

@@ -64,7 +64,7 @@ class Settings:
     chunk_size: int = 800
     chunk_overlap: int = 150
     min_chunk_len: int = 100
-    chunker_version: str = "3"
+    chunker_version: str = "4"
     chunk_strategy: str = "auto"
     schema_version: str = "2"
     qdrant_url: str = "http://localhost:6333"
@@ -121,7 +121,7 @@ class Settings:
             chunk_size=_env_int("IS4BRAG_CHUNK_SIZE", 800),
             chunk_overlap=_env_int("IS4BRAG_CHUNK_OVERLAP", 150),
             min_chunk_len=_env_int("IS4BRAG_MIN_CHUNK_LEN", 100),
-            chunker_version=os.getenv("IS4BRAG_CHUNKER_VERSION", "3"),
+            chunker_version=os.getenv("IS4BRAG_CHUNKER_VERSION", "4"),
             chunk_strategy=os.getenv("IS4BRAG_CHUNK_STRATEGY", "auto").lower(),
             schema_version=os.getenv("IS4BRAG_SCHEMA_VERSION", "2"),
             qdrant_url=os.getenv("QDRANT_URL", "http://localhost:6333"),

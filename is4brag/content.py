@@ -15,6 +15,53 @@ class NormalizedDocument:
     requirements: List[Dict[str, str]] = field(default_factory=list)
 
 
+def _colspan_count(attributes: Dict[str, str]) -> int:
+    raw = attributes.get("colspan") or "1"
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return max(1, value)
+
+
+def _format_table_lines(
+    table: List[Tuple[bool, List[str]]], table_number: int
+) -> List[str]:
+    """Serialize a table so each data row carries column names for retrieval."""
+    header_cells: List[str] = []
+    for is_header, cells in table:
+        if is_header and any(cells):
+            header_cells = list(cells)
+            break
+    lines = ["[Таблица %d]" % table_number]
+    if header_cells:
+        lines.append("| заголовок | %s |" % " | ".join(header_cells))
+    data_index = 0
+    emitted_primary_header = False
+    for is_header, cells in table:
+        if not any(cells):
+            continue
+        if is_header:
+            if not emitted_primary_header and cells == header_cells:
+                emitted_primary_header = True
+                continue
+            lines.append("| заголовок | %s |" % " | ".join(cells))
+            continue
+        data_index += 1
+        if header_cells:
+            labeled: List[str] = []
+            for index, cell in enumerate(cells):
+                name = header_cells[index] if index < len(header_cells) else ""
+                if name:
+                    labeled.append("%s: %s" % (name, cell))
+                else:
+                    labeled.append(cell)
+            lines.append("| строка %d | %s |" % (data_index, " | ".join(labeled)))
+        else:
+            lines.append("| строка %d | %s |" % (data_index, " | ".join(cells)))
+    return lines
+
+
 class _ConfluenceParser(HTMLParser):
     BLOCKS = {"p", "div", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6"}
 
@@ -22,12 +69,18 @@ class _ConfluenceParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: List[str] = []
         self.tables: List[List[Tuple[bool, List[str]]]] = []
-        self._table: Optional[List[Tuple[bool, List[str]]]] = None
+        self._table_stack: List[List[Tuple[bool, List[str]]]] = []
         self._row: Optional[List[str]] = None
         self._cell: Optional[List[str]] = None
+        self._cell_colspan = 1
         self._header_cell = False
+        self._in_thead = 0
         self._skip = 0
         self.requirements: List[Dict[str, str]] = []
+
+    @property
+    def _table(self) -> Optional[List[Tuple[bool, List[str]]]]:
+        return self._table_stack[-1] if self._table_stack else None
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
         tag = tag.lower()
@@ -56,14 +109,24 @@ class _ConfluenceParser(HTMLParser):
         if self._skip:
             return
         if tag == "table":
-            self._table = []
-        elif tag == "tr" and self._table is not None:
+            # Nested tables: finish the open cell buffer first, then push a frame.
+            if self._cell is not None:
+                self._cell.append("\n")
+            self._table_stack.append([])
+            return
+        if tag == "thead":
+            self._in_thead += 1
+            return
+        if tag == "tr" and self._table is not None:
             self._row = []
-            self._header_cell = False
-        elif tag in {"td", "th"} and self._row is not None:
+            self._header_cell = self._in_thead > 0
+            return
+        if tag in {"td", "th"} and self._row is not None:
             self._cell = []
-            self._header_cell = self._header_cell or tag == "th"
-        elif tag == "br":
+            self._cell_colspan = _colspan_count(attributes)
+            self._header_cell = self._header_cell or tag == "th" or self._in_thead > 0
+            return
+        if tag == "br":
             self._append("\n")
         elif re.fullmatch(r"h[1-6]", tag):
             self._append("\n" + ("#" * int(tag[1])) + " ")
@@ -77,23 +140,33 @@ class _ConfluenceParser(HTMLParser):
             return
         if self._skip:
             return
+        if tag == "thead":
+            self._in_thead = max(0, self._in_thead - 1)
+            return
         if tag in {"td", "th"} and self._cell is not None and self._row is not None:
-            self._row.append(_clean_inline("".join(self._cell)))
+            text = _clean_inline("".join(self._cell))
+            for _ in range(self._cell_colspan):
+                self._row.append(text)
             self._cell = None
-        elif tag == "tr" and self._row is not None and self._table is not None:
+            self._cell_colspan = 1
+            return
+        if tag == "tr" and self._row is not None and self._table is not None:
             if any(self._row):
                 self._table.append((self._header_cell, self._row))
             self._row = None
-        elif tag == "table" and self._table is not None:
-            self.tables.append(self._table)
-            table_number = len(self.tables)
-            lines = ["[Таблица %d]" % table_number]
-            for row_number, (is_header, cells) in enumerate(self._table, 1):
-                label = "заголовок" if is_header else "строка %d" % row_number
-                lines.append("| %s | %s |" % (label, " | ".join(cells)))
-            self.parts.append("\n" + "\n".join(lines) + "\n")
-            self._table = None
-        elif tag in self.BLOCKS:
+            return
+        if tag == "table" and self._table_stack:
+            table = self._table_stack.pop()
+            self.tables.append(table)
+            lines = _format_table_lines(table, len(self.tables))
+            rendered = "\n" + "\n".join(lines) + "\n"
+            if self._table_stack and self._cell is not None:
+                # Nested table stays inside the parent cell text.
+                self._cell.append(rendered)
+            else:
+                self.parts.append(rendered)
+            return
+        if tag in self.BLOCKS:
             self._append("\n")
 
     def handle_data(self, data: str) -> None:
@@ -103,7 +176,7 @@ class _ConfluenceParser(HTMLParser):
     def _append(self, value: str) -> None:
         if self._cell is not None:
             self._cell.append(value)
-        elif self._table is None:
+        elif not self._table_stack:
             self.parts.append(value)
 
 
