@@ -131,12 +131,23 @@ python3 "/app/skills/public/bitrix24/scripts/task_time.py" "Отработка �
 
 ## Smoke-проверка webhook
 
+Скрипты живут в **git-клоне** (`~/is4brag`) или после `deploy.sh` в
+`SKILLS_PUBLIC` (обычно `/home/master/deer-flow/skills/public/bitrix24/`),
+**не** в каталоге `KISU Metro`.
+
 ```bash
 export BITRIX24_WEBHOOK_URL='https://….bitrix24.ru/rest/…/…/'
-cd skills/bitrix24/scripts
+
+# Вариант A: из клона репозитория
+cd ~/is4brag/skills/bitrix24/scripts
 python3 -c "from bitrix_client import call; print(call('profile'))"
 python3 chat_summary.py "УД 01" --days 3 --limit 20 --json
 python3 task_time.py "Отработка сценариев тестирования 8 этап" --json
+
+# Вариант B: после deploy.sh
+cd /home/master/deer-flow/skills/public/bitrix24/scripts
+python3 -c "from bitrix_client import call; print(call('profile'))"
+python3 chat_summary.py "УД 01" --days 3 --limit 20 --json
 ```
 
 ## Ограничения

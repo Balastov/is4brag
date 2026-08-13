@@ -252,7 +252,7 @@ if [[ -z "$SKILLS_DEST" ]]; then
     log "      Ожидался: $DEFAULT_SKILLS_PUBLIC"
 else
     log "SKILLS_PUBLIC=$SKILLS_DEST"
-    for skill in kisu-metro galaktika-erp; do
+    for skill in kisu-metro galaktika-erp bitrix24; do
         src="$REPO_ROOT/skills/$skill"
         [[ -d "$src" ]] || continue
         dest="$SKILLS_DEST/$skill"
