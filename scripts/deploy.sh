@@ -289,6 +289,7 @@ if [[ -x "$VENV_PY" ]]; then
         "$KISU_BASE/reconcile_store.py" \
         "$KISU_BASE/benchmark_embeddings.py" \
         "$KISU_BASE/requeue_model_version.py" \
+        "$KISU_BASE/rechunk_table_pages.py" \
         "$KISU_BASE/manage_qdrant_alias.py" \
         "$KISU_BASE/search_api.py" \
         "$KISU_BASE/shadow_search.py" \
