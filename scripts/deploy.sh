@@ -134,6 +134,7 @@ SCRIPTS_COPY=(
     install_worker_service.sh
     benchmark_embeddings.py
     requeue_model_version.py
+    rechunk_table_pages.py
     manage_qdrant_alias.py
     search_api.py
     shadow_search.py
