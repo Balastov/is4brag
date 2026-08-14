@@ -1,0 +1,49 @@
+{
+  "schema_version": "1",
+  "metric_definitions": {
+    "step": "A non-empty row in template sections 6 (шаги) and 7 (негативные проверки).",
+    "step_with_page_id": "Step whose Источник contains a Confluence page_id (6+ digits).",
+    "explicit_gap": "Step marked НЕ НАЙДЕНО В ИСТОЧНИКАХ (not a hallucination).",
+    "hallucinated_step": "Human: the action or expected result is a concrete claim not supported by the cited page, or there is a concrete claim with no page_id and not an explicit gap."
+  },
+  "targets": {
+    "min_steps_with_page_id_pct": 80,
+    "max_hallucinated_steps_pct": 10
+  },
+  "pilots": [
+    {
+      "id": "utr-invest-program",
+      "title": "UTR инвестиционная программа (ПР + шаги БП)",
+      "why": "Один процесс, таблицы шагов уже в v4, известный page_id из golden.",
+      "prompt": "Собери сценарий приёмки функционала по UTR_01.01.07.01 Формирование инвестиционной программы по КВ и плана уставного фонда. Используй skill acceptance-scenario: collect_sources, шаблон, колонка Источник с page_id, пробелы не выдумывай.",
+      "collect_args": {
+        "topic": "UTR_01.01.07",
+        "codes": ["UTR_01.01.07.01", "ПР_UTR_01.01.07"]
+      },
+      "expected_source_page_ids": ["12366437", "12366436"]
+    },
+    {
+      "id": "upo-dev-trace",
+      "title": "UPO доработка ↔ ФТ (таблица трассировки)",
+      "why": "Многотабличная спецификация; проверяем, что шаги привязаны к кодам доработки/ФТ, а не к соседним UPO.",
+      "prompt": "Собери сценарий приёмки по SND-UPO_01.03_001 / dev_UPO_01.03_46 и FTT_UPO_01.03.012 (ввод/вывод единицы оборудования). Используй skill acceptance-scenario. Не смешивай другие dev_UPO без связи в источниках. В каждом шаге укажи page_id.",
+      "collect_args": {
+        "topic": "UPO_01.03 единица оборудования",
+        "codes": ["dev_UPO_01.03_46", "FTT_UPO_01.03.012", "SND-UPO_01.03_001"]
+      },
+      "expected_source_page_ids": ["62829734"]
+    },
+    {
+      "id": "udo-docs-plus-meetings",
+      "title": "UDO договорная документация (ПР + протоколы)",
+      "why": "Кросс-bucket: ПР из Стадий и протоколы из Управления проектом — типичный кейс «несколько документов».",
+      "prompt": "Собери сценарий приёмки функционала по ПР_UDO_01.01.01 Управление договорной документацией: роли, подразделения, функции. Подтяни связанные протоколы/решения советов, если они есть в выдаче. Используй skill acceptance-scenario. Протоколы — только как дельта к ПР, не замена. Пустые слоты — НЕ НАЙДЕНО В ИСТОЧНИКАХ.",
+      "collect_args": {
+        "topic": "UDO договорная документация роли",
+        "codes": ["ПР_UDO_01.01.01", "UDO_01.01.01"],
+        "meeting_query": "UDO договорная документация протокол совет решение"
+      },
+      "expected_source_page_ids": ["12365330"]
+    }
+  ]
+}

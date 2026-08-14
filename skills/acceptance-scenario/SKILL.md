@@ -71,7 +71,8 @@ python3 "/app/skills/public/acceptance-scenario/scripts/collect_sources.py" \
 1. Возьми скелет шаблона (user > built-in).
 2. Заполняй слоты **только** из карточек Phase A.
 3. У каждого шага/проверки сценария колонка **Источник**:
-   `title` + `page_id` (и `url`, если есть).
+   `title` + `page_id=<digits>` (и `url`, если есть). Формат `page_id=` обязателен
+   для пилотной оценки покрытия.
 4. Пустой слот → явно: `НЕ НАЙДЕНО В ИСТОЧНИКАХ` (не выдумывай).
 
 ### Phase C — Audit + gaps
@@ -105,3 +106,12 @@ python3 "/app/skills/public/acceptance-scenario/scripts/collect_sources.py" \
 2. Phase A → факты с page_id
 3. Phase B → шаблон
 4. Phase C → пробелы + карта источников
+
+## Пилотная оценка
+
+Три кейса и рубрика: `eval/RUN.md`, `fixtures/acceptance_pilots.json`.
+После ответа посчитайте покрытие `page_id`:
+
+```bash
+python3 "/app/skills/public/acceptance-scenario/scripts/score_scenario.py" scenario.md
+```
